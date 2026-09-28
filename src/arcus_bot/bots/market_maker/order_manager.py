@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
+from time import monotonic_ns
 
 from arcus_bot.bots.market_maker.market import MarketInfo
 from arcus_bot.bots.market_maker.quoter import (
@@ -25,6 +26,7 @@ class MakerOrderManager:
     client: MakerClient
     orders: MakerOrderActions | None
     tracked_orders: dict[str, Quote] = field(default_factory=dict)
+    placed_at_ns: dict[str, int] = field(default_factory=dict)
 
     def quotes(
         self,
@@ -70,6 +72,7 @@ class MakerOrderManager:
                 "REJECTED",
             }:
                 del self.tracked_orders[order_id]
+                _ = self.placed_at_ns.pop(order_id, None)
                 continue
             remaining = current.quantity
             if state is not None:
@@ -82,8 +85,18 @@ class MakerOrderManager:
             ):
                 del desired_by_side[current.side]
                 continue
+            placed_at = self.placed_at_ns.get(order_id)
+            if (
+                candidate is not None
+                and placed_at is not None
+                and monotonic_ns() - placed_at
+                < self.runtime.minimum_order_rest_ms * 1_000_000
+            ):
+                del desired_by_side[current.side]
+                continue
             await self.cancel_and_confirm(order_id)
             del self.tracked_orders[order_id]
+            _ = self.placed_at_ns.pop(order_id, None)
             return
 
         if self.orders is None:
@@ -113,6 +126,7 @@ class MakerOrderManager:
                 ),
             )
             self.tracked_orders[order_id] = candidate
+            self.placed_at_ns[order_id] = monotonic_ns()
             return
 
     def projected_position_exceeds_limit(self, fair_price: Decimal) -> bool:
@@ -139,6 +153,12 @@ class MakerOrderManager:
         for order_id in tuple(order_ids):
             await self.cancel_and_confirm(order_id)
             _ = self.tracked_orders.pop(order_id, None)
+            _ = self.placed_at_ns.pop(order_id, None)
+
+    async def cancel_existing_market_orders(self) -> None:
+        """Cancel only pre-existing orders in this maker's selected market."""
+        for order_id in tuple(self.client.state.open_orders):
+            await self.cancel_and_confirm(order_id)
 
     async def cancel_and_confirm(self, order_id: str) -> None:
         """Wait for a terminal Arcus lifecycle event after a cancel request."""

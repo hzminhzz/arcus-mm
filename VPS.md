@@ -129,3 +129,60 @@ reconcile a pre-existing position after a VPS reboot or process failure.
 Before restarting it, check the account and manage any remaining position or
 take-profit orders through Arcus. A normal bot stop cancels entry orders but
 leaves take-profit orders working.
+
+## Keep the continuous maker running
+
+The reference maker project documents Docker Compose with a restart policy.
+This project provides a user-level systemd unit instead, which survives shell
+logout and records output in the journal. Automatic restarts are deliberately
+disabled: the continuous maker cancels its owned orders when it stops, and on
+startup it cancels every open order in the selected account before quoting.
+It does not flatten existing positions. Do not enable or restart the service
+until you have verified the account's positions and orders and intend to let
+this maker take ownership of all open orders in that account.
+
+Install the unit for the current user:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/arcus-maker.service ~/.config/systemd/user/arcus-maker.service
+```
+
+Create `~/.config/arcus-maker.env` with the local signing key and verified
+configuration. Keep this file private (`chmod 600`) and do not put credentials
+in the unit, command history, or repository. For example, with deliberately
+non-submitting testnet settings:
+
+```text
+ARCUS_API_SIGNING_KEY=<local key>
+ARCUS_MARKETS=BTC-USD,ETH-USD
+ARCUS_ADDRESS=<account>
+ARCUS_ACCOUNT_INDEX=0
+ARCUS_ORDER_SIZE_USD=40
+ARCUS_MAX_POSITION_USD=400
+ARCUS_MAKER_FEE_BPS=0
+ARCUS_MINIMUM_EDGE_BPS=3
+ARCUS_LATENCY_BUFFER_BPS=2
+ARCUS_INVENTORY_SKEW_BPS=10
+ARCUS_MAX_BASIS_BPS=25
+```
+
+The unit is not enabled at boot and uses `Restart=no`. Inspect the account and
+processes before every start; starting a second maker is not a recovery method.
+The checked-in unit omits `--submit` and `--mainnet`, so it is deliberately
+limited to the CLI's dry-run/testnet defaults and cannot place live orders.
+For an authorized live deployment, review and explicitly change `ExecStart`
+to add both opt-ins; never store trading credentials in that command.
+
+```bash
+systemctl --user daemon-reload
+systemctl --user start arcus-maker
+systemctl --user status arcus-maker
+journalctl --user -u arcus-maker -f
+```
+
+Stop it with `systemctl --user stop arcus-maker` and allow up to 30 seconds for
+SIGINT shutdown to cancel and confirm maker orders. A stop does not flatten any
+BTC or ETH position. Check Arcus positions and open orders after both start and
+stop. To keep it across logout, the user manager must support lingering:
+`loginctl enable-linger "$USER"` (requires administrator authorization).

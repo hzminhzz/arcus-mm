@@ -16,7 +16,7 @@ type Side = Literal["BUY", "SELL"]
 
 @dataclass(frozen=True, slots=True)
 class BasisSample:
-    """Synchronized local-minus-reference midpoint sample."""
+    """Latest local-minus-reference midpoint sample."""
 
     offset: Decimal
     sampled_at_ns: int
@@ -51,7 +51,7 @@ class BasisEstimator:
         reference_mid: Decimal,
         sampled_at_ns: int,
     ) -> None:
-        """Record at most one synchronized basis sample per second."""
+        """Record at most one fresh basis sample per second."""
         if local_mid <= 0 or reference_mid <= 0:
             raise ProtocolError("cannot estimate basis from a non-positive midpoint")
         second = sampled_at_ns // 1_000_000_000

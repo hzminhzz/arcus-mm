@@ -67,7 +67,7 @@ class ContinuousMaker:
                     len(self.client.state.open_orders),
                     self.market.mapping.market,
                 )
-                await self.order_manager.cancel_open_orders()
+                await self.order_manager.cancel_existing_market_orders()
         else:
             await self.client.subscribe("l2Orderbook", self.runtime.account.market)
 
@@ -119,12 +119,6 @@ class ContinuousMaker:
                 await self.pause("Arcus orderbook is invalid")
                 continue
             local_mid = (best_bid + best_ask) / 2
-            pair_skew_ns = abs(
-                self.client.orderbook.received_at_ns - reference.received_at_ns
-            )
-            if pair_skew_ns > self.runtime.maximum_pair_skew_ms * 1_000_000:
-                await self.pause("Binance and Arcus prices are not synchronized")
-                continue
             instantaneous_basis_bps = (
                 abs(local_mid - reference.mid) * Decimal(10_000) / reference.mid
             )
@@ -239,6 +233,4 @@ def freshness_reason(
         or now_ns - book_received_at_ns > runtime.maximum_book_age_ms * 1_000_000
     ):
         return "Arcus orderbook is stale"
-    if abs(book_received_at_ns - reference.received_at_ns) > runtime.maximum_pair_skew_ms * 1_000_000:
-        return "Binance and Arcus prices are not synchronized"
     return None

@@ -64,6 +64,7 @@ class MakerRuntime:
     maximum_book_age_ms: int = 1_000
     maximum_pair_skew_ms: int = 1_000
     requote_interval_ms: int = 500
+    minimum_order_rest_ms: int = 5_000
     dry_run_duration_seconds: int = 0
     mainnet: bool = False
 
@@ -77,8 +78,11 @@ class MakerRuntime:
             self.maximum_book_age_ms,
             self.maximum_pair_skew_ms,
             self.requote_interval_ms,
+            self.minimum_order_rest_ms,
         ) <= 0:
-            raise InputError("feed, book, skew, and requote limits must be positive")
+            raise InputError(
+                "feed, book, skew, requote, and minimum-rest limits must be positive"
+            )
         if self.dry_run_duration_seconds < 0:
             raise InputError("dry-run duration cannot be negative")
         if self.mainnet and not self.submit:

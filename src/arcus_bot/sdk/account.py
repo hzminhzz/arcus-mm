@@ -46,6 +46,7 @@ class AccountState:
     position_updated_at_ns: int
     pending_position_fills: deque[tuple[int, str, Decimal]]
     orders_ready: bool
+    require_order_sequence: bool
 
     def __init__(self, market_id: int) -> None:
         self.market_id = market_id
@@ -55,6 +56,7 @@ class AccountState:
         self.position_updated_at_ns = 0
         self.pending_position_fills = deque()
         self.orders_ready = False
+        self.require_order_sequence = False
         self.open_orders: set[str] = set()
         self.order_states: dict[str, OrderState] = {}
         self.fills: deque[Fill] = deque(maxlen=100)
@@ -109,7 +111,7 @@ class AccountState:
                 if isinstance(candidate, dict):
                     row = candidate
             self.position_ready = True
-        elif message_type == "channel_data":
+        elif self.require_order_sequence and message_type == "channel_data":
             positions = contents.get("positions")
             if isinstance(positions, dict):
                 candidate = positions.get(str(self.market_id))
@@ -117,6 +119,8 @@ class AccountState:
                     row = candidate
             if row is None and contents.get("marketId") == self.market_id:
                 row = contents
+        elif not self.require_order_sequence and contents.get("marketId") == self.market_id:
+            row = contents
         else:
             return
 
@@ -138,7 +142,9 @@ class AccountState:
     def _apply_orders(self, message_type: JsonValue, contents: JsonObject) -> None:
         """Rebuild live orders from snapshots and lifecycle updates."""
         if message_type == "subscribed":
-            open_orders = contents.get("openOrders", contents.get("orders"))
+            open_orders = contents.get("openOrders")
+            if self.require_order_sequence and not isinstance(open_orders, list):
+                open_orders = contents.get("orders")
             if isinstance(open_orders, list):
                 self.open_orders = {
                     order_id
@@ -169,18 +175,19 @@ class AccountState:
         )
         side = contents.get("side")
         fill_delta = max(Decimal(0), filled_quantity - previous_filled)
-        if fill_delta > 0 and sequence_number == 0:
-            raise ProtocolError("Arcus fill update omitted its account sequence number")
-        if fill_delta > 0 and sequence_number > self.position_sequence:
-            if not isinstance(side, str) or side not in {"BUY", "SELL"}:
-                raise ProtocolError("Arcus fill update omitted a recognized order side")
-            self.pending_position_fills.append((sequence_number, side, fill_delta))
+        if self.require_order_sequence:
+            if fill_delta > 0 and sequence_number == 0:
+                raise ProtocolError("Arcus fill update omitted its account sequence number")
+            if fill_delta > 0 and sequence_number > self.position_sequence:
+                if not isinstance(side, str) or side not in {"BUY", "SELL"}:
+                    raise ProtocolError("Arcus fill update omitted a recognized order side")
+                self.pending_position_fills.append((sequence_number, side, fill_delta))
         self.order_states[order_id] = OrderState(
             status=status,
             filled_quantity=filled_quantity,
             average_fill_price=fill_price,
-            side=side if isinstance(side, str) else None,
-            sequence_number=sequence_number,
+            side=side if self.require_order_sequence and isinstance(side, str) else None,
+            sequence_number=sequence_number if self.require_order_sequence else 0,
         )
         if status in TERMINAL_STATES:
             self.open_orders.discard(order_id)

@@ -1,0 +1,16 @@
+[Unit]
+Description=Arcus BTC and ETH continuous maker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/dev/arcus
+EnvironmentFile=%h/.config/arcus-maker.env
+ExecStart=/usr/bin/flock --nonblock %t/arcus-maker.lock -- %h/dev/arcus/.venv/bin/arcus-maker --markets ${ARCUS_MARKETS} --account-address ${ARCUS_ADDRESS} --account-index ${ARCUS_ACCOUNT_INDEX} --order-size-usd ${ARCUS_ORDER_SIZE_USD} --max-position-usd ${ARCUS_MAX_POSITION_USD} --maker-fee-bps ${ARCUS_MAKER_FEE_BPS} --minimum-edge-bps ${ARCUS_MINIMUM_EDGE_BPS} --latency-buffer-bps ${ARCUS_LATENCY_BUFFER_BPS} --inventory-skew-bps ${ARCUS_INVENTORY_SKEW_BPS} --max-basis-bps ${ARCUS_MAX_BASIS_BPS}
+Restart=no
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

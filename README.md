@@ -1,101 +1,489 @@
-# Arcus Multi-Limit Grid Bot
+# Arcus Algorithmic Trading Suite
 
-The default strategy keeps multiple passive entry limits working, pairs each
-entry fill with a take-profit limit, and spaces projected close prices using a
-directional grid. A legacy one-at-a-time strategy remains available with
-`--strategy cycle`.
+A high-performance, modular Python algorithmic trading bot suite for the
+[Arcus](https://arcus.xyz) decentralized perpetual exchange. It provides a
+continuous two-sided market maker anchored to Binance USD-M futures, an
+asynchronous multi-limit directional grid bot, and a real-time account and order
+book terminal monitor.
+
+---
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Project Architecture](#project-architecture)
+- [Installation](#installation)
+- [Security and Environment Setup](#security-and-environment-setup)
+- [1. Continuous Market Maker (`arcus-maker`)](#1-continuous-market-maker-arcus-maker)
+  - [How It Works](#how-it-works)
+  - [CLI Parameter Reference](#cli-parameter-reference)
+  - [Dry-Run / Preview Mode](#dry-run--preview-mode)
+  - [Live Trading on Testnet](#live-trading-on-testnet)
+  - [Live Trading on Mainnet](#live-trading-on-mainnet)
+  - [Risk Limits and Resting Time](#risk-limits-and-resting-time)
+- [2. Multi-Limit Directional Grid Bot (`arcus-bot`)](#2-multi-limit-directional-grid-bot-arcus-bot)
+  - [How It Works](#how-it-works-1)
+  - [CLI Parameter Reference](#cli-parameter-reference-1)
+  - [Previewing the Grid](#previewing-the-grid)
+  - [Live Trading with Grid Bot](#live-trading-with-grid-bot)
+  - [Legacy Cycle Strategy](#legacy-cycle-strategy)
+- [3. Read-Only Account Monitor (`arcus-monitor`)](#3-read-only-account-monitor-arcus-monitor)
+- [Deployment and 24/7 Operations (systemd)](#deployment-and-247-operations-systemd)
+- [Development and Testing](#development-and-testing)
+
+---
+
+## Overview
+
+The repository exposes three CLI entry points:
+
+1. **`arcus-maker`**: Continuous quoting market maker for `BTC-USD` and `ETH-USD`.
+   Consumes Binance USD-M futures public order book tickers (`BTCUSDT`, `ETHUSDT`)
+   as external fair value references, adjusts prices for fee economics, inventory
+   skew, and latency buffers, and submits resting bid/ask limit quotes on Arcus.
+2. **`arcus-bot`**: Multi-limit directional grid trading bot. Places passive entry
+   limit orders, attaches take-profit limit orders upon fills, and spaces orders
+   according to a configurable percentage grid step.
+3. **`arcus-monitor`**: Read-only terminal dashboard showing order book depth,
+   current positions, equity, free collateral, open orders, and recent fills.
+
+---
+
+## Project Architecture
 
 ```text
 src/arcus_bot/
-├── bots/cycle/        # Legacy one-at-a-time entry/exit strategy
-├── bots/grid/         # Multi-entry grid and close-order management
-├── bots/market_maker/ # Continuous testnet quoting strategy
-├── cli/               # Trading and read-only monitor commands
-├── pricing/           # External reference price feeds
-├── sdk/               # Arcus WebSocket, account, book, and order adapters
-├── utils/             # Process logging
-└── types.py           # Shared account and strategy types
-tests/                # Strategy, signing-payload, and account-state tests
+├── bots/
+│   ├── market_maker/   # Continuous quoting strategy with Binance reference feed
+│   │   ├── index.py    # Runtime coordinator, quote loops, freshness gating
+│   │   ├── market.py   # Arcus market definitions, tick tiers, Binance mappings
+│   │   ├── quoter.py   # Fair value estimation, basis tracker, price skew calculations
+│   │   ├── order_manager.py # Lifecycle of quotes, minimum rest times, cancellations
+│   │   └── runtime.py  # Maker configuration and state tracking
+│   ├── grid/           # Multi-limit grid strategy and close-order tracking
+│   └── cycle/          # Legacy sequential one-at-a-time entry/exit strategy
+├── cli/
+│   ├── maker.py        # Entry point for `arcus-maker`
+│   ├── maker_config.py # CLI argument parsing and validation for market maker
+│   ├── bot.py          # Entry point for `arcus-bot`
+│   └── monitor.py      # Entry point for `arcus-monitor`
+├── pricing/
+│   └── binance.py      # Asynchronous Binance USD-M futures bookTicker feed
+├── sdk/
+│   ├── client.py       # Arcus WebSocket client and channel subscriptions
+│   ├── account.py      # Balance, position, and order tracking
+│   ├── orderbook.py    # L2 order book management
+│   └── orders.py       # EIP-712 order signing and submission
+├── utils/
+│   └── logger.py       # Structured logging setup
+└── types.py            # Core domain dataclasses and validation errors
+tests/                  # Unit and integration test suite
+deploy/                 # Production systemd service unit templates
 ```
 
-Install the project and development tools:
+---
+
+## Installation
+
+### Prerequisites
+
+- **Python**: Version 3.12 or newer
+- **uv**: Fast Python package manager ([install instructions](https://github.com/astral-sh/uv))
+
+### From Git Checkout
+
+Clone the repository and install dependencies using `uv`:
 
 ```bash
+git clone https://github.com/hzminhzz/arcus-mm.git
+cd arcus-mm
 uv sync
 ```
 
-For a locked production install and VPS/systemd instructions, see
-[`VPS.md`](VPS.md). The public repository can also be installed as a user-level
-CLI package with `uv tool install git+https://github.com/hzminhzz/arcus-mm`.
+The CLI binaries are placed in `.venv/bin/` and can also be run with `uv run`:
+- `uv run arcus-maker --help`
+- `uv run arcus-bot --help`
+- `uv run arcus-monitor --help`
 
-Preview the grid without connecting to Arcus:
+### As a Global CLI Tool
 
-```bash
-uv run arcus-bot \
-  --address 0x... --account-index 0 \
-  --market-id 1 --market BTC-USD \
-  --side BUY --quantity 0.0006 --tick-size 0.1 \
-  --step-size 0.00000001 --max-orders 4 \
-  --wait-seconds 450 --entry-timeout-seconds 300 \
-  --grid-step 0.5 --max-order-notional 60 \
-  --max-total-volume 5000
-```
-
-`--max-orders` counts active entries and exits; the bot reserves one exit slot
-for every active entry. `--entry-timeout-seconds` applies to entry orders only.
-Take-profit orders stay open until filled or canceled. There is no overall
-wall-clock timeout: the grid runs until its volume cap, `--stop-price`, or a
-manual interrupt. Stop and pause prices are disabled by default (`-1`); for
-BUY, both trigger when price is at or above their threshold, and for SELL they
-trigger at or below it. The grid-step value is a percent; `0` disables spacing.
-
-`--max-total-volume` is a cumulative gross-turnover limit, not a loss cap.
-Startup requires a flat subaccount with no open orders. This strategy has no
-stop-loss.
-
-Live order submission requires `ARCUS_API_SIGNING_KEY` and the explicit
-`--submit` flag. Testnet is the default; add `--mainnet` to select mainnet.
-
-The separate read-only dashboard uses public Arcus channels and does not need
-the signing key:
+To install directly into your environment using `uv tool`:
 
 ```bash
-uv run arcus-monitor \
-  --address 0x... --account-index 0 \
-  --market-id 1 --market BTC-USD
+uv tool install git+https://github.com/hzminhzz/arcus-mm
+uv tool update-shell
 ```
 
-The monitor shows the book, position, account equity and free collateral, open
-orders, and recent fills. Press Ctrl+C to disconnect.
+---
 
-## Continuous BTC/ETH market maker
+## Security and Environment Setup
 
-`arcus-maker` runs a separate continuous quoting strategy for Arcus BTC-USD
-(market 1) and ETH-USD (market 2), using BTCUSDT and ETHUSDT Binance USD-M
-perpetual book-ticker streams as external references. It defaults to
-non-trading previews on Arcus testnet. `--submit` is required to place orders;
-mainnet additionally requires `--mainnet`. Either live mode requires
-`ARCUS_API_SIGNING_KEY` and `--account-address`.
+### Private Key Management
 
-Fee and risk/economic inputs are mandatory rather than guessed. Supply
-`--maker-fee-bps`, `--minimum-edge-bps`, `--latency-buffer-bps`,
-`--inventory-skew-bps`, `--order-size-usd`, `--max-position-usd`, and
-`--max-basis-bps`. The account should be dedicated to this maker: startup
-cancels any existing orders for the selected market, and shutdown cancels and
-confirms its remaining orders.
+Live order placement requires an Ethereum-compatible signing key authorized for
+your Arcus subaccount.
+
+- The key is read exclusively from the `ARCUS_API_SIGNING_KEY` environment variable.
+- **Never** hardcode private keys in code or scripts.
+- **Never** pass private keys via CLI flags (CLI arguments are visible in process tables like `ps aux`).
+- Store local keys in a restricted environment file (`chmod 600`):
+
+```bash
+# Example ~/.config/arcus-maker.env
+ARCUS_API_SIGNING_KEY=0x...your-32-byte-hex-signing-key...
+```
+
+To load it in your current terminal session:
+
+```bash
+set -a
+source ~/.config/arcus-maker.env
+set +a
+```
+
+---
+
+## 1. Continuous Market Maker (`arcus-maker`)
+
+### How It Works
+
+`arcus-maker` quotes two-sided liquidity around a reference price:
+
+1. **Binance Reference**: Subscribes to real-time `bookTicker` events from
+   Binance USD-M Futures (`wss://fstream.binance.com/public/ws`) for `BTCUSDT`
+   and `ETHUSDT`.
+2. **Basis Adjustment**: Tracks rolling median basis differences between Arcus
+   and Binance to account for persistent exchange spread divergences.
+3. **Economic Pricing**:
+   - Computes bid and ask prices from fair value plus/minus maker fees, minimum
+     edge, and latency buffer.
+   - Applies an inventory skew penalty: if long inventory accumulates, bids are
+     discounted and asks become more aggressive to unwind inventory.
+4. **Resting Quote Management**:
+   - Healthy quotes rest for at least `--minimum-order-rest-ms` (default 5000 ms)
+     to avoid excessive churn and allow orders to accumulate queue priority.
+   - If reference feeds go stale, basis limits breach, or book cross conditions
+     occur, quotes are immediately canceled for protection.
+
+### CLI Parameter Reference
+
+| Flag | Required | Default | Description |
+|---|---|---|---|
+| `--markets` | No | `BTC-USD,ETH-USD` | Comma-separated Arcus markets: `BTC-USD`, `ETH-USD`. |
+| `--order-size-usd` | **Yes** | — | Order notional per quote in USD (e.g. `40`). |
+| `--max-position-usd` | **Yes** | — | Maximum net position allowed in USD (e.g. `400`). |
+| `--maker-fee-bps` | **Yes** | — | Arcus maker fee in bps (can be `0` or negative for rebates). |
+| `--minimum-edge-bps` | **Yes** | — | Minimum expected edge/profit margin in bps (e.g. `3`). |
+| `--latency-buffer-bps`| **Yes** | — | Execution latency risk buffer in bps (e.g. `2`). |
+| `--inventory-skew-bps`| **Yes** | — | Inventory skew factor in bps per 100% position limit (e.g. `10`). |
+| `--max-basis-bps` | **Yes** | — | Max allowable basis divergence between Binance and Arcus before quoting pauses (e.g. `25`). |
+| `--account-address` | For `--submit` | `""` | Arcus Ethereum account address (`0x...`). |
+| `--account-index` | No | `0` | Subaccount index (`0` through `9`). |
+| `--minimum-order-rest-ms` | No | `5000` | Minimum resting time (ms) before replacing healthy orders. |
+| `--maximum-feed-age-ms` | No | `2000` | Maximum age (ms) of Binance reference feed before pausing. |
+| `--maximum-book-age-ms` | No | `1000` | Maximum age (ms) of Arcus order book before pausing. |
+| `--requote-interval-ms` | No | `500` | Frequency (ms) of quoting cycle checks. |
+| `--basis-window-seconds`| No | `300` | Rolling window (seconds) for basis estimation. |
+| `--basis-samples` | No | `3` | Minimum basis samples required before quoting begins. |
+| `--duration-seconds` | No | `0` | Auto-stop preview after N seconds (`0` runs indefinitely). |
+| `--dry-run` | No | `True` | Non-trading preview mode (default). |
+| `--submit` | For live orders | `False`| Explicit opt-in flag required to place live orders. |
+| `--mainnet` | For mainnet | `False`| Route to Arcus mainnet (must be paired with `--submit`). |
+| `--log-level` | No | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). |
+
+### Dry-Run / Preview Mode
+
+Test configuration, pricing calculations, and feed connectivity without submitting orders:
 
 ```bash
 uv run arcus-maker \
   --markets BTC-USD,ETH-USD \
-  --maker-fee-bps "$MAKER_FEE_BPS" \
-  --minimum-edge-bps "$MINIMUM_EDGE_BPS" \
-  --latency-buffer-bps "$LATENCY_BUFFER_BPS" \
-  --inventory-skew-bps "$INVENTORY_SKEW_BPS" \
-  --order-size-usd "$ORDER_SIZE_USD" \
-  --max-position-usd "$MAX_POSITION_USD" \
-  --max-basis-bps "$MAX_BASIS_BPS"
+  --order-size-usd 40 \
+  --max-position-usd 400 \
+  --maker-fee-bps 0 \
+  --minimum-edge-bps 3 \
+  --latency-buffer-bps 2 \
+  --inventory-skew-bps 10 \
+  --max-basis-bps 25 \
+  --duration-seconds 30
 ```
 
-Use `--duration-seconds N` to stop a non-trading preview after `N` seconds. To
-submit testnet orders, add `--submit --account-address 0x...`. Mainnet requires
-both `--submit` and `--mainnet --account-address 0x...`.
+### Live Trading on Testnet
+
+Submits real quotes to the Arcus testnet. Requires `ARCUS_API_SIGNING_KEY` and `--account-address`:
+
+```bash
+set -a && source ~/.config/arcus-maker.env && set +a
+
+uv run arcus-maker \
+  --markets BTC-USD,ETH-USD \
+  --account-address 0xYOUR_ACCOUNT_ADDRESS \
+  --account-index 0 \
+  --order-size-usd 40 \
+  --max-position-usd 400 \
+  --maker-fee-bps 0 \
+  --minimum-edge-bps 3 \
+  --latency-buffer-bps 2 \
+  --inventory-skew-bps 10 \
+  --max-basis-bps 25 \
+  --submit
+```
+
+### Live Trading on Mainnet
+
+To submit live orders to Arcus mainnet, provide both `--submit` and `--mainnet`:
+
+```bash
+set -a && source ~/.config/arcus-maker.env && set +a
+
+uv run arcus-maker \
+  --markets BTC-USD,ETH-USD \
+  --account-address 0xYOUR_ACCOUNT_ADDRESS \
+  --account-index 0 \
+  --order-size-usd 40 \
+  --max-position-usd 400 \
+  --maker-fee-bps 0 \
+  --minimum-edge-bps 3 \
+  --latency-buffer-bps 2 \
+  --inventory-skew-bps 10 \
+  --max-basis-bps 25 \
+  --submit \
+  --mainnet
+```
+
+### Risk Limits and Resting Time
+
+- **Dedicated Subaccount**: On startup, `arcus-maker` automatically cancels any
+  pre-existing open orders for the targeted market to take clean ownership of quotes.
+- **Graceful Shutdown**: On `SIGINT` (Ctrl+C) or `SIGTERM`, all active maker
+  quotes are automatically canceled and verified before exiting.
+- **Order Rest Time**: Controlled by `--minimum-order-rest-ms` (default 5000 ms).
+  Healthy quotes are held to provide queue priority and avoid API spam. Unhealthy
+  quotes (breached limits, crossed markets, stale feeds) are canceled immediately.
+
+---
+
+## 2. Multi-Limit Directional Grid Bot (`arcus-bot`)
+
+### How It Works
+
+`arcus-bot` runs a directional grid strategy:
+- Maintains up to `--max-orders` working limit entry orders.
+- Each time an entry fills, a corresponding take-profit exit order is automatically
+  submitted at `(fill_price * (1 + take_profit_percent))`.
+- Spaces entry orders using a directional percentage grid step (`--grid-step`).
+- Manages entry timeouts (`--entry-timeout-seconds`) to cancel unfilled entries
+  and re-anchor closer to the market.
+- Halts new entries when reaching `--stop-price` or `--pause-price`.
+- Shuts down once `--max-total-volume` cumulative gross turnover is reached.
+
+### CLI Parameter Reference
+
+| Flag | Required | Default | Description |
+|---|---|---|---|
+| `--strategy` | No | `grid` | Strategy engine: `grid` or `cycle`. |
+| `--address` | **Yes** | — | Arcus account address (`0x...`). |
+| `--account-index` | **Yes** | `0` | Subaccount index (`0` through `9`). |
+| `--market-id` | **Yes** | — | Market ID (`1` for BTC-USD, `2` for ETH-USD). |
+| `--market` | **Yes** | — | Market display name (`BTC-USD`, `ETH-USD`). |
+| `--side` | No | `BUY` | Entry side (`BUY` or `SELL`). |
+| `--quantity` | **Yes** | — | Order quantity in base asset units (e.g. `0.0006`). |
+| `--tick-size` | **Yes** | — | Market price tick size (e.g. `0.1` for BTC-USD). |
+| `--step-size` | **Yes** | — | Market quantity step size (e.g. `0.00000001`). |
+| `--take-profit-percent` | No | `0.02` | Take profit target percent (e.g. `0.02` for 2%). |
+| `--max-order-notional` | No | `1000` | Maximum notional value in USD per single order. |
+| `--max-total-volume` | No | `10000`| Total cumulative gross trading volume cap. |
+| `--max-orders` | No | `4` | Maximum total concurrent active entry + exit orders. |
+| `--wait-seconds` | No | `450` | Cooldown period between entry submissions. |
+| `--entry-timeout-seconds` | No | `300` | Timeout after which an unfilled entry is canceled. |
+| `--grid-step` | No | `0.5` | Percent price spacing between grid levels (`0` disables). |
+| `--stop-price` | No | `-1` | Stop adding new entries at this directional price (`-1` disables). |
+| `--pause-price` | No | `-1` | Temporarily pause new entries at this directional price (`-1` disables). |
+| `--submit` | For live orders | `False`| Place live orders on Arcus (default is preview). |
+| `--mainnet` | For mainnet | `False`| Use mainnet instead of testnet. |
+
+### Previewing the Grid
+
+Test your grid geometry without placing orders:
+
+```bash
+uv run arcus-bot \
+  --address 0xYOUR_ACCOUNT_ADDRESS \
+  --account-index 0 \
+  --market-id 1 \
+  --market BTC-USD \
+  --side BUY \
+  --quantity 0.0006 \
+  --tick-size 0.1 \
+  --step-size 0.00000001 \
+  --max-orders 4 \
+  --wait-seconds 450 \
+  --entry-timeout-seconds 300 \
+  --grid-step 0.5 \
+  --max-order-notional 60 \
+  --max-total-volume 5000
+```
+
+### Live Trading with Grid Bot
+
+To execute on testnet:
+
+```bash
+set -a && source ~/.config/arcus-maker.env && set +a
+
+uv run arcus-bot \
+  --address 0xYOUR_ACCOUNT_ADDRESS \
+  --account-index 0 \
+  --market-id 1 \
+  --market BTC-USD \
+  --side BUY \
+  --quantity 0.0006 \
+  --tick-size 0.1 \
+  --step-size 0.00000001 \
+  --max-orders 4 \
+  --wait-seconds 450 \
+  --entry-timeout-seconds 300 \
+  --grid-step 0.5 \
+  --max-order-notional 60 \
+  --max-total-volume 5000 \
+  --submit
+```
+
+Add `--mainnet` for live mainnet execution.
+
+### Legacy Cycle Strategy
+
+The cycle strategy executes one order cycle at a time: it places a single entry,
+waits for fill, places a take-profit order, waits for exit fill, and repeats:
+
+```bash
+uv run arcus-bot \
+  --strategy cycle \
+  --address 0xYOUR_ACCOUNT_ADDRESS \
+  --account-index 0 \
+  --market-id 1 \
+  --market BTC-USD \
+  --side BUY \
+  --quantity 0.0006 \
+  --tick-size 0.1 \
+  --step-size 0.00000001 \
+  --take-profit-percent 0.02 \
+  --cycles 10 \
+  --submit
+```
+
+---
+
+## 3. Read-Only Account Monitor (`arcus-monitor`)
+
+`arcus-monitor` provides a live terminal dashboard displaying:
+- Top-of-book BBO and spread
+- Account equity, balance, and free collateral
+- Active open positions, unrealized PnL, and liquidation prices
+- Open orders and recent fill history
+
+It operates on public WebSocket channels and does not require a private key.
+
+### Usage
+
+```bash
+# Testnet monitor
+uv run arcus-monitor \
+  --address 0xYOUR_ACCOUNT_ADDRESS \
+  --account-index 0 \
+  --market-id 1 \
+  --market BTC-USD
+
+# Mainnet monitor
+uv run arcus-monitor \
+  --address 0xYOUR_ACCOUNT_ADDRESS \
+  --account-index 0 \
+  --market-id 1 \
+  --market BTC-USD \
+  --mainnet
+```
+
+---
+
+## Deployment and 24/7 Operations (systemd)
+
+For continuous, reliable operation on a Linux VPS, run `arcus-maker` under a
+user-level systemd service unit.
+
+### 1. Configure Environment File
+
+Create `~/.config/arcus-maker.env` and lock permissions:
+
+```bash
+cat << 'EOF' > ~/.config/arcus-maker.env
+ARCUS_API_SIGNING_KEY=your-32-byte-hex-signing-key
+ARCUS_MARKETS=BTC-USD,ETH-USD
+ARCUS_ADDRESS=0xyour-account-address
+ARCUS_ACCOUNT_INDEX=0
+ARCUS_ORDER_SIZE_USD=40
+ARCUS_MAX_POSITION_USD=400
+ARCUS_MAKER_FEE_BPS=0
+ARCUS_MINIMUM_EDGE_BPS=3
+ARCUS_LATENCY_BUFFER_BPS=2
+ARCUS_INVENTORY_SKEW_BPS=10
+ARCUS_MAX_BASIS_BPS=25
+EOF
+
+chmod 600 ~/.config/arcus-maker.env
+```
+
+### 2. Install the User Service Unit
+
+The repository includes `deploy/arcus-maker.service`:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/arcus-maker.service ~/.config/systemd/user/arcus-maker.service
+```
+
+*(Note: The default unit executes in preview mode. To submit live orders, edit
+`ExecStart` in `~/.config/systemd/user/arcus-maker.service` to append `--submit`
+or `--submit --mainnet`)*
+
+### 3. Service Commands
+
+```bash
+# Reload user daemon
+systemctl --user daemon-reload
+
+# Start the market maker
+systemctl --user start arcus-maker
+
+# Check status
+systemctl --user status arcus-maker
+
+# Follow live output logs
+journalctl --user -u arcus-maker -f
+
+# Stop gracefully (SIGINT allows 30s to cancel open orders)
+systemctl --user stop arcus-maker
+```
+
+To enable persistent execution across SSH logout:
+
+```bash
+loginctl enable-linger "$USER"
+```
+
+For extended VPS operational patterns, see [`VPS.md`](VPS.md).
+
+---
+
+## Development and Testing
+
+Run test suite with pytest:
+
+```bash
+uv run pytest
+```
+
+Run static type checking with basedpyright:
+
+```bash
+uv run basedpyright
+```

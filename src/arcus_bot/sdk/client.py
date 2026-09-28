@@ -76,6 +76,7 @@ class ArcusClient:
 
     async def subscribe_maker_channels(self) -> None:
         """Subscribe to market and account streams used by the continuous maker."""
+        self.state.require_order_sequence = True
         await self.subscribe("l2Orderbook", self.account.market)
         for channel in ("orders", "positions", "userFills"):
             await self.subscribe(

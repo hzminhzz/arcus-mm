@@ -34,6 +34,7 @@ class MakerArguments(argparse.Namespace):
     maximum_book_age_ms: int = 1_000
     maximum_pair_skew_ms: int = 1_000
     requote_interval_ms: int = 500
+    minimum_order_rest_ms: int = 5_000
     basis_window_seconds: int = 300
     basis_samples: int = 3
     duration_seconds: int = 0
@@ -56,6 +57,7 @@ class MakerOptions:
     maximum_book_age_ms: int
     maximum_pair_skew_ms: int
     requote_interval_ms: int
+    minimum_order_rest_ms: int
     basis_window_seconds: int
     basis_samples: int
     duration_seconds: int
@@ -104,6 +106,12 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
     _ = parser.add_argument("--maximum-book-age-ms", type=int, default=1_000)
     _ = parser.add_argument("--maximum-pair-skew-ms", type=int, default=1_000)
     _ = parser.add_argument("--requote-interval-ms", type=int, default=500)
+    _ = parser.add_argument(
+        "--minimum-order-rest-ms",
+        type=int,
+        default=5_000,
+        help="Minimum healthy quote lifetime before replacement (default: 5000).",
+    )
     _ = parser.add_argument("--basis-window-seconds", type=int, default=300)
     _ = parser.add_argument("--basis-samples", type=int, default=3)
     _ = parser.add_argument(
@@ -147,6 +155,7 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
         args.maximum_book_age_ms,
         args.maximum_pair_skew_ms,
         args.requote_interval_ms,
+        args.minimum_order_rest_ms,
         args.basis_window_seconds,
         args.basis_samples,
     ) <= 0:
@@ -201,6 +210,7 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
         maximum_book_age_ms=args.maximum_book_age_ms,
         maximum_pair_skew_ms=args.maximum_pair_skew_ms,
         requote_interval_ms=args.requote_interval_ms,
+        minimum_order_rest_ms=args.minimum_order_rest_ms,
         basis_window_seconds=args.basis_window_seconds,
         basis_samples=args.basis_samples,
         duration_seconds=args.duration_seconds,

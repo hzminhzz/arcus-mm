@@ -45,6 +45,7 @@ async def _run(options: MakerOptions) -> None:
                 maximum_book_age_ms=options.maximum_book_age_ms,
                 maximum_pair_skew_ms=options.maximum_pair_skew_ms,
                 requote_interval_ms=options.requote_interval_ms,
+                minimum_order_rest_ms=options.minimum_order_rest_ms,
                 dry_run_duration_seconds=options.duration_seconds,
                 mainnet=options.mainnet,
             )
@@ -74,8 +75,10 @@ def main() -> int:
     except (ProtocolError, TimeoutError, OSError, websockets.WebSocketException) as error:
         print(f"Arcus maker stopped: {error}", file=sys.stderr)
         return 1
-    except ExceptionGroup as errors:
-        print(f"Arcus maker stopped: {errors}", file=sys.stderr)
+    except BaseExceptionGroup as errors:
+        for error in errors.exceptions:
+            logger.exception("Arcus maker task failed", exc_info=error)
+        print(f"Arcus maker stopped: {errors!r}", file=sys.stderr)
         return 1
 
 

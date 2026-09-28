@@ -1,11 +1,15 @@
 """Deterministic tests for the continuous Arcus market maker."""
 
 import json
+from dataclasses import replace
 from decimal import Decimal
+from time import monotonic_ns
+from types import SimpleNamespace
 
 import anyio
 import pytest
 
+from arcus_bot.cli.maker import main as maker_main
 from arcus_bot.bots.market_maker.market import (
     MARKET_MAPPINGS,
     MarketInfo,
@@ -238,6 +242,7 @@ def test_quoter_only_quotes_reducing_side_at_position_cap() -> None:
 def test_account_state_projects_fill_until_position_sequence_catches_up() -> None:
     # Given a flat Arcus snapshot at sequence 10 and a later partial buy fill.
     state = AccountState(market_id=1)
+    state.require_order_sequence = True
     state.apply(
         {
             "type": "subscribed",
@@ -294,6 +299,26 @@ def test_account_state_projects_fill_until_position_sequence_catches_up() -> Non
     assert state.position == Decimal("0.03")
     assert state.effective_position == Decimal("0.03")
     assert not state.pending_position_fills
+
+
+def test_account_order_snapshot_only_tracks_selected_market() -> None:
+    # Given an account-wide snapshot containing a BTC quote and an unrelated HYPE order.
+    state = AccountState(market_id=1)
+    state.apply(
+        {
+            "type": "subscribed",
+            "channel": "orders",
+            "contents": {
+                "openOrders": [
+                    {"marketId": 1, "orderId": "btc-order"},
+                    {"marketId": 6, "orderId": "hype-order"},
+                ]
+            },
+        }
+    )
+
+    # Then only the selected BTC market is eligible for maker cancellation.
+    assert state.open_orders == {"btc-order"}
 
 
 def test_order_payload_uses_dynamic_increments_and_client_id() -> None:
@@ -431,6 +456,36 @@ class _FakeMakerOrders:
         )
 
 
+def test_startup_cancellation_only_targets_selected_market() -> None:
+    # Given a BTC maker state whose snapshot includes an unrelated HYPE order.
+    client = _FakeMakerClient()
+    client.state.apply(
+        {
+            "type": "subscribed",
+            "channel": "orders",
+            "contents": {
+                "openOrders": [
+                    {"marketId": 1, "orderId": "btc-order"},
+                    {"marketId": 6, "orderId": "hype-order"},
+                ]
+            },
+        }
+    )
+    orders = _FakeMakerOrders(client)
+    manager = MakerOrderManager(
+        runtime=_runtime(submit=True),
+        market=MarketInfo(mapping=MARKET_MAPPINGS["BTC-USD"], status="ONLINE"),
+        client=client,
+        orders=orders,
+    )
+
+    # When startup cleanup runs for this market.
+    anyio.run(manager.cancel_existing_market_orders)
+
+    # Then only the BTC order is passed to Arcus cancellation.
+    assert orders.cancelled == ["btc-order"]
+
+
 def test_stale_reference_pause_cancels_and_confirms_owned_quotes() -> None:
     # Given a live maker with one owned Arcus order and a stale reference price.
     client = _FakeMakerClient()
@@ -533,6 +588,75 @@ def test_reconcile_confirms_cancel_before_replacement() -> None:
     assert not manager.tracked_orders
 
 
+def test_reconcile_holds_changed_quote_until_minimum_rest_expires() -> None:
+    # Given a healthy open bid that has not rested for the configured minimum.
+    client = _FakeMakerClient()
+    orders = _FakeMakerOrders(client)
+    client.state.open_orders.add("order-1")
+    client.state.order_states["order-1"] = OrderState(
+        status="OPEN",
+        filled_quantity=Decimal(0),
+        average_fill_price=Decimal(0),
+        side="BUY",
+    )
+    current = Quote(side="BUY", price=Decimal("99.9"), quantity=Decimal("0.2"))
+    replacement = Quote(side="BUY", price=Decimal("99.8"), quantity=Decimal("0.2"))
+    runtime = replace(_runtime(submit=True), minimum_order_rest_ms=5_000)
+    manager = MakerOrderManager(
+        runtime=runtime,
+        market=MarketInfo(mapping=MARKET_MAPPINGS["BTC-USD"], status="ONLINE"),
+        client=client,
+        orders=orders,
+        tracked_orders={"order-1": current},
+        placed_at_ns={"order-1": monotonic_ns()},
+    )
+
+    # When the desired price changes before the rest timer expires.
+    anyio.run(
+        manager.reconcile,
+        (replacement,),
+        Decimal("100"),
+        Decimal("99.8"),
+        Decimal("100.1"),
+    )
+
+    # Then the still-desired side remains resting without cancel/replacement churn.
+    assert not orders.cancelled
+    assert not orders.placed
+    assert manager.tracked_orders == {"order-1": current}
+    assert client.state.open_orders == {"order-1"}
+
+
+def test_cancel_open_orders_ignores_minimum_rest_interval() -> None:
+    # Given an owned healthy quote whose minimum rest interval has not elapsed.
+    client = _FakeMakerClient()
+    orders = _FakeMakerOrders(client)
+    client.state.open_orders.add("order-1")
+    client.state.order_states["order-1"] = OrderState(
+        status="OPEN",
+        filled_quantity=Decimal(0),
+        average_fill_price=Decimal(0),
+        side="BUY",
+    )
+    quote = Quote(side="BUY", price=Decimal("99.9"), quantity=Decimal("0.2"))
+    manager = MakerOrderManager(
+        runtime=replace(_runtime(submit=True), minimum_order_rest_ms=60_000),
+        market=MarketInfo(mapping=MARKET_MAPPINGS["BTC-USD"], status="ONLINE"),
+        client=client,
+        orders=orders,
+        tracked_orders={"order-1": quote},
+        placed_at_ns={"order-1": monotonic_ns()},
+    )
+
+    # When the caller explicitly cancels all orders for safety.
+    anyio.run(manager.cancel_open_orders)
+
+    # Then safety cancellation is immediate and terminally confirmed.
+    assert orders.cancelled == ["order-1"]
+    assert not client.state.open_orders
+    assert not manager.tracked_orders
+
+
 def test_projected_position_reserves_fillable_order_quantity() -> None:
     # Given a long position with an additional active bid near its USD cap.
     client = _FakeMakerClient()
@@ -580,6 +704,22 @@ def test_freshness_gate_rejects_missing_and_stale_feeds() -> None:
     assert stale_book == "Arcus orderbook is stale"
 
 
+def test_freshness_gate_accepts_fresh_independently_arriving_feeds() -> None:
+    # Given both feeds are fresh but arrived at different times within their age limits.
+    runtime = _runtime(submit=False)
+    reference = parse_book_ticker(
+        '{"s":"BTCUSDT","b":"100","a":"101"}',
+        "BTCUSDT",
+        9_100_000_000,
+    )
+
+    # When the Arcus snapshot arrived 900 ms after the Binance update.
+    reason = freshness_reason(10_000_000_000, reference, 10_000_000_000, runtime)
+
+    # Then freshness depends on age, not simultaneous packet arrival.
+    assert reason is None
+
+
 def test_mainnet_market_data_and_orders_require_submit_opt_in() -> None:
     # Given fully specified risk/economic inputs but only the mainnet selector.
     argv = [
@@ -606,3 +746,34 @@ def test_mainnet_market_data_and_orders_require_submit_opt_in() -> None:
     # Then it fails before any network connection can be opened.
     with pytest.raises(InputError, match="--mainnet requires --submit"):
         _ = parse_options(argv)
+
+
+def test_task_group_error_is_rendered_with_original_exception(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given a live runner whose child task fails with an actionable cause.
+    async def fail_run(options: object) -> None:
+        _ = options
+        raise BaseExceptionGroup(
+            "unhandled errors in a TaskGroup",
+            [OSError("Binance connection reset")],
+        )
+
+    monkeypatch.setattr("arcus_bot.cli.maker._run", fail_run)
+    monkeypatch.setattr(
+        "arcus_bot.cli.maker.parse_options",
+        lambda: SimpleNamespace(log_level="INFO"),
+    )
+    def ignore_log_level(level: str) -> None:
+        _ = level
+
+    monkeypatch.setattr("arcus_bot.cli.maker.configure_logging", ignore_log_level)
+
+    # When the command-line entrypoint catches the task-group failure.
+    result = maker_main()
+
+    # Then the original nested cause is written to stderr and exit is nonzero.
+    captured = capsys.readouterr()
+    assert result == 1
+    assert "OSError('Binance connection reset')" in captured.err

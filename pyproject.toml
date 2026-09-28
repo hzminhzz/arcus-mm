@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "arcus-maker-helper"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "anyio",
+    "cryptography",
+    "pydantic",
+    "typing-extensions",
+    "websockets",
+]
+
+[project.scripts]
+arcus-bot = "arcus_bot.cli.bot:main"
+arcus-monitor = "arcus_bot.cli.monitor:main"
+arcus-maker = "arcus_bot.cli.maker:main"
+
+[dependency-groups]
+dev = [
+    "basedpyright",
+    "pytest",
+]
+
+[tool.basedpyright]
+typeCheckingMode = "all"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/arcus_bot"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

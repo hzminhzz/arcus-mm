@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from time import monotonic_ns
 from typing import Final
 
@@ -12,10 +13,14 @@ from arcus_bot.bots.market_maker.quoter import (
     Quote,
     QuoteContext,
     Side,
+    align_price,
+    align_size,
     calculate_quotes,
 )
 from arcus_bot.bots.market_maker.runtime import MakerClient, MakerOrderActions, MakerRuntime
 from arcus_bot.types import OrderRules, ProtocolError
+
+logger = logging.getLogger(__name__)
 
 _ZERO: Final = Decimal(0)
 
@@ -59,6 +64,67 @@ class MakerOrderManager:
     ) -> None:
         """Cancel and confirm changed orders before placing replacements."""
         desired_by_side = {quote.side: quote for quote in desired_quotes}
+        position = self.client.state.effective_position if self.runtime.submit else Decimal(0)
+        position_notional = abs(position) * fair_price
+        max_position_usd = self.runtime.quote_config.maximum_position_usd
+        is_exposure_breached = position_notional > max_position_usd
+        increasing_side: Side | None = (
+            ("BUY" if position > 0 else "SELL") if position != _ZERO else None
+        )
+
+        if is_exposure_breached and increasing_side is not None:
+            if increasing_side in desired_by_side:
+                del desired_by_side[increasing_side]
+            for order_id, current in tuple(self.tracked_orders.items()):
+                if current.side == increasing_side:
+                    await self.cancel_and_confirm(order_id)
+                    del self.tracked_orders[order_id]
+                    _ = self.placed_at_ns.pop(order_id, None)
+                    return
+
+            emergency_threshold = max_position_usd * self.runtime.emergency_flatten_ratio
+            if position_notional >= emergency_threshold and self.orders is not None:
+                max_allowed_qty = max_position_usd / fair_price
+                excess_qty = abs(position) - max_allowed_qty
+                aligned_excess = align_size(excess_qty, self.market.mapping.step_size)
+                if (
+                    aligned_excess >= self.market.mapping.min_order_size
+                    and aligned_excess * fair_price >= self.market.mapping.min_order_notional
+                ):
+                    flatten_side: Side = "SELL" if position > 0 else "BUY"
+                    buffer_frac = self.runtime.emergency_flatten_buffer_bps / Decimal(10_000)
+                    if flatten_side == "BUY":
+                        raw_price = best_ask * (1 + buffer_frac)
+                        tick = self.market.tick_size_for(raw_price)
+                        flatten_price = align_price(raw_price, tick, ROUND_CEILING)
+                    else:
+                        raw_price = best_bid * (1 - buffer_frac)
+                        tick = self.market.tick_size_for(raw_price)
+                        flatten_price = align_price(raw_price, tick, ROUND_FLOOR)
+                    order_id = await self.orders.place(
+                        flatten_side,
+                        flatten_price,
+                        aligned_excess,
+                        OrderRules(
+                            tick_size=self.market.tick_size_for(flatten_price),
+                            step_size=self.market.mapping.step_size,
+                            client_id=f"am-{self.market.mapping.market_id}-{self.runtime.run_id}-emerg",
+                            reduce_only=True,
+                            time_in_force="IOC",
+                        ),
+                    )
+                    logger.warning(
+                        "EMERGENCY FLATTEN %s: position notional $%s >= threshold $%s. Placed IOC %s %s@%s (order %s)",
+                        self.market.mapping.market,
+                        position_notional,
+                        emergency_threshold,
+                        flatten_side,
+                        aligned_excess,
+                        flatten_price,
+                        order_id,
+                    )
+                    return
+
         unknown_orders = self.client.state.open_orders - self.tracked_orders.keys()
         if unknown_orders:
             raise ProtocolError(
@@ -143,6 +209,8 @@ class MakerOrderManager:
                     tick_size=self.market.tick_size_for(candidate.price),
                     step_size=self.market.mapping.step_size,
                     client_id=client_id,
+                    reduce_only=candidate.reduce_only,
+                    time_in_force="ALO",
                 ),
             )
             self.tracked_orders[order_id] = candidate

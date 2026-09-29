@@ -123,6 +123,7 @@ class Quote:
     side: Side
     price: Decimal
     quantity: Decimal
+    reduce_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +146,10 @@ def _align(price: Decimal, tick: Decimal, rounding: str) -> Decimal:
 def _align_size(quantity: Decimal, step: Decimal) -> Decimal:
     """Round an order quantity down to the market step."""
     return (quantity / step).to_integral_value(rounding=ROUND_FLOOR) * step
+
+
+align_price = _align
+align_size = _align_size
 
 
 def calculate_quotes(context: QuoteContext) -> tuple[Quote, ...]:
@@ -241,14 +246,21 @@ def calculate_quotes(context: QuoteContext) -> tuple[Quote, ...]:
             case "SELL":
                 edge_bps = (price - fair) * _BPS / fair - config.maker_fee_bps
                 is_passive = price > bid
+        is_inventory_reducing = (
+            (side == "SELL" and context.position > 0)
+            or (side == "BUY" and context.position < 0)
+        )
         if edge_bps < config.minimum_edge_bps + config.latency_buffer_bps:
-            is_inventory_reducing = (
-                (side == "SELL" and context.position > 0)
-                or (side == "BUY" and context.position < 0)
-            )
             if not is_inventory_reducing or edge_bps < 0:
                 continue
         if not is_passive:
             continue
-        quotes.append(Quote(side=side, price=price, quantity=aligned_quantity))
+        quotes.append(
+            Quote(
+                side=side,
+                price=price,
+                quantity=aligned_quantity,
+                reduce_only=is_inventory_reducing,
+            )
+        )
     return tuple(quotes)

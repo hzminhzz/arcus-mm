@@ -60,11 +60,13 @@ class OrderConfig:
 
 @dataclass(frozen=True, slots=True)
 class OrderRules:
-    """Per-market signing increments and optional stable client order ID."""
+    """Per-market signing increments, reduce-only flag, time-in-force, and client order ID."""
 
     tick_size: Decimal
     step_size: Decimal
     client_id: str | None = None
+    reduce_only: bool = False
+    time_in_force: str = "ALO"
 
 
 @dataclass(frozen=True, slots=True)

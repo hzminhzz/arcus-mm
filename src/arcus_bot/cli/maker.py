@@ -79,6 +79,8 @@ async def _run(options: MakerOptions) -> None:
                 max_alpha_bps=options.max_alpha_bps,
                 alpha_report_path=options.alpha_report_path,
                 alpha_report_data=options.alpha_report_data,
+                emergency_flatten_ratio=options.emergency_flatten_ratio,
+                emergency_flatten_buffer_bps=options.emergency_flatten_buffer_bps,
             )
             logger.info(
                 "%s Arcus %s market=%s id=%s feed=%s symbol=%s",

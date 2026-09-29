@@ -48,6 +48,8 @@ class MakerArguments(argparse.Namespace):
     alpha_report_path: str = ""
     reference_feed: str = "auto"
     preview_feeds: bool = False
+    emergency_flatten_ratio: str = "1.20"
+    emergency_flatten_buffer_bps: str = "10"
     dry_run: bool = False
     submit: bool = False
     mainnet: bool = False
@@ -84,6 +86,8 @@ class MakerOptions:
     reference_feed: str = "auto"
     market_feeds: dict[str, tuple[str, str]] = field(default_factory=dict)
     preview_feeds: bool = False
+    emergency_flatten_ratio: Decimal = Decimal("1.20")
+    emergency_flatten_buffer_bps: Decimal = Decimal("10")
 
 
 MakerConfig = MakerOptions
@@ -283,6 +287,16 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
         help="Safe non-trading live preview of reference feeds and Arcus orderbooks.",
     )
     _ = parser.add_argument(
+        "--emergency-flatten-ratio",
+        default="1.20",
+        help="Exposure multiplier threshold to trigger emergency market-order flattening (default: 1.20).",
+    )
+    _ = parser.add_argument(
+        "--emergency-flatten-buffer-bps",
+        default="10",
+        help="Slippage buffer in bps for emergency IOC flattening orders (default: 10).",
+    )
+    _ = parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Explicitly select the default non-trading preview mode.",
@@ -404,6 +418,13 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
 
     market_feeds = parse_reference_feed(args.reference_feed, tuple(mappings))
 
+    emergency_ratio = _decimal(args.emergency_flatten_ratio, "--emergency-flatten-ratio")
+    if emergency_ratio <= 1:
+        raise InputError("--emergency-flatten-ratio must be greater than 1.0")
+    emergency_buffer = _decimal(args.emergency_flatten_buffer_bps, "--emergency-flatten-buffer-bps")
+    if emergency_buffer < 0:
+        raise InputError("--emergency-flatten-buffer-bps cannot be negative")
+
     return MakerOptions(
         markets=tuple(mappings),
         account_address=account_address,
@@ -431,4 +452,6 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
         reference_feed=args.reference_feed,
         market_feeds=market_feeds,
         preview_feeds=args.preview_feeds,
+        emergency_flatten_ratio=emergency_ratio,
+        emergency_flatten_buffer_bps=emergency_buffer,
     )

@@ -235,6 +235,8 @@ set +a
 | `--candidate-mode` | No | `off` | Alpha candidate evaluation mode (`off`, `shadow`, `bounded`). |
 | `--max-alpha-bps` | No | `0` | Maximum candidate alpha offset in basis points. |
 | `--alpha-report-path` | For bounded | `""` | Path to authentic GO alpha evaluation report (required for bounded mode). |
+| `--emergency-flatten-ratio` | No | `1.20` | Exposure multiplier threshold to trigger emergency market IOC flattening (default: `1.20` = 120%). |
+| `--emergency-flatten-buffer-bps` | No | `10` | Slippage buffer in bps for emergency IOC flattening orders (default: `10`). |
 | `--dry-run` | No | `True` | Non-trading preview mode (default). |
 | `--submit` | For live orders | `False`| Explicit opt-in flag required to place live orders. |
 | `--mainnet` | For mainnet | `False`| Route to Arcus mainnet (must be paired with `--submit`). |
@@ -302,12 +304,26 @@ uv run arcus-maker \
 
 ### Risk Limits and Resting Time
 
+- **Hard Exposure Circuit Breaker**:
+  - When `abs(position) * fair_price > max_position_usd`, all exposure-increasing
+    orders are immediately canceled without waiting for order rest timers.
+  - New exposure-increasing quotes are strictly suppressed. Only inventory-reducing
+    quotes (BUY if short, SELL if long) are permitted.
+- **Native `reduceOnly` EIP-712 Order Signing**:
+  - All inventory-reducing quotes are stamped with `reduce_only=True` (`r=1` in the
+    signed payload and `"reduceOnly": True` in the REST/RPC body).
+  - The Arcus matching engine atomically rejects any fill that would exceed the
+    position reduction or flip the position into an opposite overshoot.
+- **Emergency Excess Flattener**:
+  - If unexpected fills or transport lag push exposure beyond `--emergency-flatten-ratio`
+    (default 120% of `--max-position-usd`), an aggressive `reduce_only=True` IOC order
+    is immediately submitted at marketable BBO to liquidate the excess.
 - **Dedicated Subaccount**: On startup, `arcus-maker` automatically cancels any
   pre-existing open orders for the targeted market to take clean ownership of quotes.
 - **Graceful Shutdown**: On `SIGINT` (Ctrl+C) or `SIGTERM`, all active maker
   quotes are automatically canceled and verified before exiting.
 - **Order Rest Time**: Controlled by `--minimum-order-rest-ms` (default 5000 ms).
-  Healthy quotes are held to provide queue priority and avoid API spam. Unhealthy
+  Healthy quotes are held to provide queue priority and avoid API churn. Unhealthy
   quotes (breached limits, crossed markets, stale feeds) are canceled immediately.
 
 ### Alpha Candidate Evaluation and Shadow Mode

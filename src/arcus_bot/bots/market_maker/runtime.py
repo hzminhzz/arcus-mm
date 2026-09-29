@@ -89,10 +89,16 @@ class MakerRuntime:
     max_alpha_bps: Decimal = Decimal("0")
     alpha_report_path: str = ""
     alpha_report_data: JsonObject | None = None
+    emergency_flatten_ratio: Decimal = Decimal("1.20")
+    emergency_flatten_buffer_bps: Decimal = Decimal("10")
 
     def __post_init__(self) -> None:
         if self.maximum_basis_bps <= 0:
             raise InputError("maximum basis must be positive")
+        if self.emergency_flatten_ratio <= 1:
+            raise InputError("emergency flatten ratio must be greater than 1.0")
+        if self.emergency_flatten_buffer_bps < 0:
+            raise InputError("emergency flatten buffer bps cannot be negative")
         if self.basis_window_seconds <= 0 or self.basis_minimum_samples <= 0:
             raise InputError("basis window and warm-up sample count must be positive")
         if min(

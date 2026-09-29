@@ -22,6 +22,7 @@ from arcus_bot.types import (
 )
 
 ALO_CODE: Final = 3
+TIF_CODE: Final = {"IOC": 1, "GTC": 2, "ALO": 3}
 SIDE_CODE: Final = {"BUY": 0, "SELL": 1}
 
 
@@ -62,7 +63,10 @@ class ArcusOrders:
         """Build the decimal REST-style body and typed order-sign payload."""
         if side not in SIDE_CODE:
             raise InputError("side must be BUY or SELL")
-        good_til_us = timestamp_ns // 1000 + 31 * 86_400_000_000
+        reduce_only = rules.reduce_only if rules is not None else False
+        time_in_force = rules.time_in_force if rules is not None else "ALO"
+        tif_code = TIF_CODE.get(time_in_force, ALO_CODE)
+        good_til_us = timestamp_ns // 1000 + (31 * 86_400_000_000 if time_in_force != "IOC" else 300_000_000)
         account = config.account
         tick_size = rules.tick_size if rules is not None else config.tick_size
         step_size = rules.step_size if rules is not None else config.step_size
@@ -76,9 +80,9 @@ class ArcusOrders:
             "op": 1,
             "p": aligned_units(price, tick_size, "price"),
             "q": aligned_units(quantity, step_size, "quantity"),
-            "r": 0,
+            "r": 1 if reduce_only else 0,
             "s": SIDE_CODE[side],
-            "t": ALO_CODE,
+            "t": tif_code,
             "v": 1,
         }
         if client_id is not None:
@@ -91,9 +95,10 @@ class ArcusOrders:
             "orderType": "LIMIT",
             "quantity": str(quantity),
             "price": str(price),
-            "timeInForce": "ALO",
+            "timeInForce": time_in_force,
             "goodTilTime": str(good_til_us),
             "timestamp": timestamp_ns,
+            "reduceOnly": bool(reduce_only),
         }
         if client_id is not None:
             body["clientId"] = client_id

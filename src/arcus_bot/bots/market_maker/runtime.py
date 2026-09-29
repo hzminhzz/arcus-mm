@@ -50,6 +50,16 @@ class MakerOrderActions(Protocol):
     async def cancel(self, order_id: str) -> None: ...
 
 
+class ReferenceFeed(Protocol):
+    """External reference market stream (Binance or Hyperliquid)."""
+
+    symbol: str
+    feed_name: str
+    latest: object
+
+    async def run(self) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class MakerRuntime:
     """Validated inputs shared by one per-market maker session."""
@@ -60,6 +70,8 @@ class MakerRuntime:
     signing_key: str | None
     run_id: str
     maximum_basis_bps: Decimal
+    reference_feed: str = "binance"
+    reference_symbol: str = ""
     basis_window_seconds: int = 300
     basis_minimum_samples: int = 3
     maximum_feed_age_ms: int = 2_000

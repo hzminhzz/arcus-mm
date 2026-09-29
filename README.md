@@ -39,10 +39,12 @@ book terminal monitor.
 
 The repository exposes three CLI entry points:
 
-1. **`arcus-maker`**: Continuous quoting market maker for `BTC-USD` and `ETH-USD`.
-    Consumes Binance USD-M futures public order book tickers as external fair
-    value references, adjusts prices for fee economics, inventory skew, and
-    latency buffers, and submits resting bid/ask limit quotes on Arcus.
+1. **`arcus-maker`**: Continuous quoting market maker for crypto (`BTC-USD`, `ETH-USD`,
+   `ZEC-USD`, `NEAR-USD`) and stock/ETF perpetuals (`HOOD-USD`, `NVDA-USD`, `AMZN-USD`,
+   `CRCL-USD`, `SNDK-USD`, `DRAM-USD`). Consumes real-time BBO and oracle prices from
+   Binance USD-M futures or Hyperliquid WebSocket feeds (with HIP-3 equity support),
+   adjusts prices for fee economics, inventory skew, and latency buffers, and submits
+   resting bid/ask limit quotes on Arcus.
 2. **`arcus-bot`**: Multi-limit directional grid trading bot. Places passive entry
    limit orders, attaches take-profit limit orders upon fills, and spaces orders
    according to a configurable percentage grid step.
@@ -56,9 +58,9 @@ The repository exposes three CLI entry points:
 ```text
 src/arcus_bot/
 ├── bots/
-│   ├── market_maker/   # Continuous quoting strategy with Binance reference feed
+│   ├── market_maker/   # Continuous quoting strategy with multi-feed reference pricing
 │   │   ├── index.py    # Runtime coordinator, quote loops, freshness gating
-│   │   ├── market.py   # Arcus market definitions, tick tiers, Binance mappings
+│   │   ├── market.py   # Arcus market definitions, tick tiers, Binance & Hyperliquid mappings
 │   │   ├── quoter.py   # Fair value estimation, basis tracker, price skew calculations
 │   │   ├── order_manager.py # Lifecycle of quotes, minimum rest times, cancellations
 │   │   └── runtime.py  # Maker configuration and state tracking
@@ -70,7 +72,8 @@ src/arcus_bot/
 │   ├── bot.py          # Entry point for `arcus-bot`
 │   └── monitor.py      # Entry point for `arcus-monitor`
 ├── pricing/
-│   └── binance.py      # Asynchronous Binance USD-M futures bookTicker feed
+│   ├── binance.py      # Asynchronous Binance USD-M futures bookTicker feed
+│   └── hyperliquid.py  # Asynchronous Hyperliquid l2Book and activeAssetCtx feed (HIP-3)
 ├── sdk/
 │   ├── client.py       # Arcus WebSocket client and channel subscriptions
 │   ├── account.py      # Balance, position, and order tracking
@@ -151,13 +154,22 @@ set +a
 
 `arcus-maker` quotes two-sided liquidity around a reference price:
 
-1. **Binance Reference**: Subscribes to real-time `bookTicker` events from
-   Binance USD-M Futures (`wss://fstream.binance.com/public/ws`) for the
-   configured market's matching symbol. Supported mappings currently include
-   `BTC-USD`/`BTCUSDT`, `ETH-USD`/`ETHUSDT`, `ZEC-USD`/`ZECUSDT`,
-   `AMZN-USD`/`AMZNUSDT`, and `NEAR-USD`/`NEARUSDT`.
-2. **Basis Adjustment**: Tracks rolling median basis differences between Arcus
-   and Binance to account for persistent exchange spread divergences.
+1. **Reference Price Feeds**:
+   - **Binance USD-M Futures**: Subscribes to real-time `bookTicker` events from
+     Binance (`wss://fstream.binance.com/public/ws`). Default feed for crypto markets
+     (`BTC-USD`, `ETH-USD`, `ZEC-USD`, `NEAR-USD`).
+   - **Hyperliquid L2 Book & Oracle**: Subscribes to official Hyperliquid WebSocket
+     `l2Book` and `activeAssetCtx` channels (`wss://api.hyperliquid.xyz/ws`). Provides
+     exact top-of-book depth, quantities, and oracle price anchoring for HIP-3
+     builder-deployed equities (`xyz:HOOD`, `xyz:NVDA`, `xyz:AMZN`, `xyz:CRCL`,
+     `xyz:SNDK`, `xyz:DRAM`).
+2. **Basis Adjustment & Divergence Safety**:
+   - Tracks rolling median basis differences between Arcus and the reference venue
+     to account for persistent exchange spread differences.
+   - Computes instantaneous basis against reference fair value. If the basis
+     exceeds `--max-basis-bps`, quoting immediately halts.
+   - For Hyperliquid feeds, validates positive, finite, uncrossed book prices and
+     ensures book mid does not materially diverge from the official oracle price.
 3. **Economic Pricing**:
    - Computes bid and ask prices from fair value plus/minus maker fees, minimum
      edge, and latency buffer.
@@ -169,22 +181,52 @@ set +a
    - If reference feeds go stale, basis limits breach, or book cross conditions
      occur, quotes are immediately canceled for protection.
 
+### Supported Markets and Reference Feeds
+
+| Arcus Market | Market ID | Base Asset | Default Feed | Binance Symbol | Hyperliquid Symbol | Status |
+|---|---|---|---|---|---|---|
+| `BTC-USD` | 1 | BTC | `binance` | `BTCUSDT` | `BTC` | ONLINE |
+| `ETH-USD` | 2 | ETH | `binance` | `ETHUSDT` | `ETH` | ONLINE |
+| `ZEC-USD` | 8 | ZEC | `binance` | `ZECUSDT` | — | ONLINE |
+| `HOOD-USD` | 18 | HOOD | `hyperliquid` | — | `xyz:HOOD` | ONLINE |
+| `CRCL-USD` | 19 | CRCL | `hyperliquid` | — | `xyz:CRCL` | ONLINE |
+| `NVDA-USD` | 28 | NVDA | `hyperliquid` | — | `xyz:NVDA` | ONLINE |
+| `AMZN-USD` | 31 | AMZN | `hyperliquid` | `AMZNUSDT` | `xyz:AMZN` | ONLINE |
+| `SNDK-USD` | 33 | SNDK | `hyperliquid` | — | `xyz:SNDK` | ONLINE |
+| `DRAM-USD` | 34 | DRAM | `hyperliquid` | — | `xyz:DRAM` | ONLINE |
+| `NEAR-USD` | 56 | NEAR | `binance` | `NEARUSDT` | `NEAR` | ONLINE |
+
+> **Note on Initial Deployment**: Prioritize `HOOD-USD`, `NVDA-USD`, and `AMZN-USD` for equity perpetual market making. Do not enable every stock market automatically. The default `--markets` configuration remains `BTC-USD,ETH-USD`. Stock markets are only engaged when explicitly specified in `--markets`.
+
+### HIP-3 Equity Market Properties and Risk Disclosures
+
+- **Builder-Deployed Perps & Oracle Risk**: HIP-3 equity perpetuals on Hyperliquid are deployed and maintained by third-party builders (such as `xyz`). The oracle price feeds, mark price algorithms, and collateral terms carry builder and oracle deployer risks distinct from native exchange-listed contracts.
+- **Trading Hours Mismatch**: Hyperliquid and Arcus perpetual markets operate 24/7/365, whereas the underlying equity shares trade during regular US market hours (09:30–16:00 ET) and limited extended sessions. During off-market hours and weekends, underlying equity liquidity is absent, spreads on reference venues may widen, and perpetual prices may trade at wider basis offsets reflecting weekend sentiment or illiquidity.
+- **Strict Instrument Identity**: The system forbids substituting approximate instruments for exact underlyings. For example, generic index or commodity perps (such as Hyperliquid's `SP500` or `GOLD`) are not exact substitutes for ETF instruments like `SPY` or `GLD` and will fail closed rather than risk uncontrolled basis drift.
+
+#### Official References
+- [Hyperliquid WebSocket Documentation](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket)
+- [Hyperliquid Info Endpoint Reference](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint)
+- [HIP-3: Builder-Deployed Perpetuals](https://hyperliquid.gitbook.io/hyperliquid-docs/hyperliquid-improvement-proposals-hips/hip-3-builder-deployed-perpetuals)
+
 ### CLI Parameter Reference
 
 | Flag | Required | Default | Description |
 |---|---|---|---|
-| `--markets` | No | `BTC-USD,ETH-USD` | Comma-separated supported markets: `BTC-USD`, `ETH-USD`, `ZEC-USD`, `AMZN-USD`, `NEAR-USD`. |
+| `--markets` | No | `BTC-USD,ETH-USD` | Comma-separated supported markets: `BTC-USD`, `ETH-USD`, `ZEC-USD`, `HOOD-USD`, `CRCL-USD`, `NVDA-USD`, `AMZN-USD`, `SNDK-USD`, `DRAM-USD`, `NEAR-USD`. |
+| `--reference-feed` | No | `auto` | Reference feed engine: `auto`, `binance`, `hyperliquid`, or comma-separated overrides (e.g. `HOOD-USD=hyperliquid,BTC-USD=binance`). |
+| `--preview-feeds` | No | `False` | Safe non-trading live preview of reference feeds, Arcus orderbooks, basis, and generated quotes. |
 | `--order-size-usd` | **Yes** | — | Order notional per quote in USD (e.g. `40`). |
 | `--max-position-usd` | **Yes** | — | Maximum net position allowed in USD (e.g. `400`). |
 | `--maker-fee-bps` | **Yes** | — | Arcus maker fee in bps (can be `0` or negative for rebates). |
 | `--minimum-edge-bps` | **Yes** | — | Minimum expected edge/profit margin in bps (e.g. `3`). |
 | `--latency-buffer-bps`| **Yes** | — | Execution latency risk buffer in bps (e.g. `2`). |
 | `--inventory-skew-bps`| **Yes** | — | Inventory skew factor in bps per 100% position limit (e.g. `10`). |
-| `--max-basis-bps` | **Yes** | — | Max allowable basis divergence between Binance and Arcus before quoting pauses (e.g. `25`). |
+| `--max-basis-bps` | **Yes** | — | Max allowable basis divergence between reference venue and Arcus before quoting pauses (e.g. `50`). |
 | `--account-address` | For `--submit` | `""` | Arcus Ethereum account address (`0x...`). |
 | `--account-index` | No | `0` | Subaccount index (`0` through `9`). |
 | `--minimum-order-rest-ms` | No | `5000` | Minimum resting time (ms) before replacing healthy orders. |
-| `--maximum-feed-age-ms` | No | `2000` | Maximum age (ms) of Binance reference feed before pausing. |
+| `--maximum-feed-age-ms` | No | `2000` | Maximum age (ms) of reference feed before pausing. |
 | `--maximum-book-age-ms` | No | `1000` | Maximum age (ms) of Arcus order book before pausing. |
 | `--requote-interval-ms` | No | `500` | Frequency (ms) of quoting cycle checks. |
 | `--basis-window-seconds`| No | `300` | Rolling window (seconds) for basis estimation. |

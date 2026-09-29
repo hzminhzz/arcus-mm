@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from time import monotonic_ns
-from typing import cast
+from typing import Generic, TypeVar, cast
 
 import anyio
 import websockets
@@ -23,18 +23,21 @@ from arcus_bot.bots.market_maker.runtime import (
     MakerRuntime,
 )
 from arcus_bot.cli.maker_config import verify_authentic_go_report
-from arcus_bot.pricing.binance import BinanceBookTickerFeed
-from arcus_bot.pricing.binance import BinanceBookTicker
+from arcus_bot.pricing.binance import BinanceBookTicker, BinanceBookTickerFeed
+from arcus_bot.pricing.hyperliquid import HyperliquidBookTicker, HyperliquidBookTickerFeed
 from arcus_bot.sdk.client import ArcusClient
 from arcus_bot.sdk.orders import ArcusOrders
 from arcus_bot.types import JsonObject, OrderConfig, ProtocolError
 
 logger = logging.getLogger(__name__)
 
+type ReferenceTicker = BinanceBookTicker | HyperliquidBookTicker
+FeedT = TypeVar("FeedT", BinanceBookTickerFeed, HyperliquidBookTickerFeed)
+
 
 def check_candidate_health(
     now_ns: int,
-    candidate_ticker: BinanceBookTicker | None,
+    candidate_ticker: ReferenceTicker | None,
     maximum_candidate_age_ms: int,
 ) -> tuple[bool, str]:
     """Check candidate BBO and quantity health and freshness."""
@@ -57,15 +60,15 @@ def check_candidate_health(
 
 
 @dataclass(slots=True)
-class ContinuousMaker:
+class ContinuousMaker(Generic[FeedT]):
     """Manage one market's Arcus state, reference feed, and owned quotes."""
 
     runtime: MakerRuntime
     market: MarketInfo
     client: MakerClient
-    feed: BinanceBookTickerFeed
+    feed: FeedT
     orders: MakerOrderActions | None
-    candidate_feed: BinanceBookTickerFeed | None = None
+    candidate_feed: FeedT | None = None
     candidate_mode: str = "off"
     max_alpha_bps: Decimal = Decimal("0")
     alpha_report_path: str | Path | None = None
@@ -171,12 +174,14 @@ class ContinuousMaker:
         """Execute one evaluation and quoting step."""
         current_time_ns = monotonic_ns() if now_ns is None else now_ns
         await self._check_live_limits(current_time_ns)
-        reference = self.feed.latest
+        reference: ReferenceTicker | None = self.feed.latest
+        feed_label = getattr(self.feed, "feed_name", "Binance")
         reason = freshness_reason(
             current_time_ns,
             reference,
             self.client.orderbook.received_at_ns,
             self.runtime,
+            feed_name=feed_label,
         )
         if reason is not None:
             await self.pause(reason)
@@ -186,7 +191,7 @@ class ContinuousMaker:
         self.stale_since_ns = 0
         self.stale_reason = ""
         if reference is None:
-            raise ProtocolError("freshness check accepted a missing Binance reference")
+            raise ProtocolError(f"freshness check accepted a missing {feed_label} reference")
 
         try:
             best_bid, best_ask = self.client.orderbook.current()
@@ -194,21 +199,22 @@ class ContinuousMaker:
             await self.pause("Arcus orderbook is invalid")
             return None
         local_mid = (best_bid + best_ask) / 2
+        fair_anchor = reference.fair_anchor
         instantaneous_basis_bps = (
-            abs(local_mid - reference.mid) * Decimal(10_000) / reference.mid
+            abs(local_mid - fair_anchor) * Decimal(10_000) / fair_anchor
         )
         if instantaneous_basis_bps > self.runtime.maximum_basis_bps:
-            await self.pause("Arcus/Binance basis exceeded its configured limit")
+            await self.pause(f"Arcus/{feed_label} basis exceeded its configured limit")
             return None
 
         sample_at_ns = max(
             self.client.orderbook.received_at_ns,
             reference.received_at_ns,
         )
-        self.basis.add_sample(local_mid, reference.mid, sample_at_ns)
-        baseline_fair_price = self.basis.fair_price(reference.mid, current_time_ns)
+        self.basis.add_sample(local_mid, fair_anchor, sample_at_ns)
+        baseline_fair_price = self.basis.fair_price(fair_anchor, current_time_ns)
         if baseline_fair_price is None:
-            await self.pause("Waiting for a qualified Arcus/Binance basis")
+            await self.pause(f"Waiting for a qualified Arcus/{feed_label} basis")
             return None
 
         baseline_quotes = self.order_manager.quotes(baseline_fair_price, best_bid, best_ask)
@@ -412,7 +418,7 @@ async def run_market(runtime: MakerRuntime, market: MarketInfo) -> None:
     recover_existing_orders = False
     environment = "mainnet" if runtime.mainnet else "testnet"
     while True:
-        maker: ContinuousMaker | None = None
+        maker: ContinuousMaker[BinanceBookTickerFeed] | ContinuousMaker[HyperliquidBookTickerFeed] | None = None
         remaining_seconds: float | None = None
         if runtime.run_deadline_ns is not None:
             remaining_seconds = (
@@ -441,14 +447,34 @@ async def run_market(runtime: MakerRuntime, market: MarketInfo) -> None:
                     if runtime.submit and runtime.signing_key is not None
                     else None
                 )
-                maker = ContinuousMaker(
-                    runtime=runtime,
-                    market=market,
-                    client=client,
-                    feed=BinanceBookTickerFeed(market.mapping.binance_symbol),
-                    orders=orders,
-                    recover_existing_orders=recover_existing_orders,
-                )
+                if runtime.reference_feed == "hyperliquid":
+                    hl_sym = (
+                        runtime.reference_symbol
+                        or market.mapping.hyperliquid_symbol
+                        or ""
+                    )
+                    maker = ContinuousMaker(
+                        runtime=runtime,
+                        market=market,
+                        client=client,
+                        feed=HyperliquidBookTickerFeed(hl_sym),
+                        orders=orders,
+                        recover_existing_orders=recover_existing_orders,
+                    )
+                else:
+                    bn_sym = (
+                        runtime.reference_symbol
+                        or market.mapping.binance_symbol
+                        or ""
+                    )
+                    maker = ContinuousMaker(
+                        runtime=runtime,
+                        market=market,
+                        client=client,
+                        feed=BinanceBookTickerFeed(bn_sym),
+                        orders=orders,
+                        recover_existing_orders=recover_existing_orders,
+                    )
                 if runtime.run_deadline_ns is None:
                     await maker.run()
                 else:
@@ -508,15 +534,16 @@ def is_recoverable_session_error(error: BaseExceptionGroup[BaseException]) -> bo
 
 def freshness_reason(
     now_ns: int,
-    reference: BinanceBookTicker | None,
+    reference: ReferenceTicker | None,
     book_received_at_ns: int,
     runtime: MakerRuntime,
+    feed_name: str = "Binance",
 ) -> str | None:
     """Return a fail-closed pause reason when either feed is missing, stale, or skewed."""
     if reference is None:
-        return "Binance reference is not available"
+        return f"{feed_name} reference is not available"
     if now_ns - reference.received_at_ns > runtime.maximum_feed_age_ms * 1_000_000:
-        return "Binance reference is stale"
+        return f"{feed_name} reference is stale"
     if (
         book_received_at_ns == 0
         or now_ns - book_received_at_ns > runtime.maximum_book_age_ms * 1_000_000

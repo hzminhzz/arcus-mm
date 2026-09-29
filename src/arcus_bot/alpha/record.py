@@ -187,7 +187,9 @@ def parse_arcus_l2_frame(
 def resolve_binance_symbol(market: str) -> str:
     normalized = market.strip().upper()
     if normalized in MARKET_MAPPINGS:
-        return MARKET_MAPPINGS[normalized].binance_symbol
+        binance_symbol = MARKET_MAPPINGS[normalized].binance_symbol
+        if binance_symbol is not None:
+            return binance_symbol
 
     cleaned = normalized.replace("-", "").replace("/", "")
     if cleaned.endswith("USD"):

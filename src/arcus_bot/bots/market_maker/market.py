@@ -11,7 +11,7 @@ import anyio
 import websockets
 from pydantic import BaseModel, ConfigDict, StrictInt, StrictStr, ValidationError
 
-from arcus_bot.types import JSON_ADAPTER, JsonObject, JsonValue, ProtocolError
+from arcus_bot.types import JSON_ADAPTER, InputError, JsonObject, JsonValue, ProtocolError
 
 TESTNET_WS: Final = "wss://api.testnet.arcus.xyz/v1/ws"
 MAINNET_WS: Final = "wss://api.arcus.xyz/v1/ws"
@@ -27,18 +27,41 @@ class TickTier:
 
 @dataclass(frozen=True, slots=True)
 class MarketMapping:
-    """Explicit Arcus market to Binance symbol and verified increments."""
+    """Explicit Arcus market to Binance and Hyperliquid symbols and verified increments."""
 
     market: str
     market_id: int
     base_asset: str
-    binance_symbol: str
+    binance_symbol: str | None
     tick_size: Decimal
     step_size: Decimal
     min_order_size: Decimal
     min_order_notional: Decimal
     max_order_size: Decimal
     tick_tiers: tuple[TickTier, ...]
+    hyperliquid_symbol: str | None = None
+    default_feed: Literal["binance", "hyperliquid"] = "binance"
+
+    def resolve_feed(self, requested_feed: str | None = None) -> tuple[str, str]:
+        """Resolve the effective feed engine ('binance' or 'hyperliquid') and external symbol."""
+        feed = (requested_feed or self.default_feed).strip().lower()
+        if feed == "auto":
+            feed = self.default_feed
+        if feed == "hyperliquid":
+            if self.hyperliquid_symbol is None:
+                raise InputError(
+                    f"market {self.market} does not support Hyperliquid reference feed"
+                )
+            return "hyperliquid", self.hyperliquid_symbol
+        if feed == "binance":
+            if self.binance_symbol is None:
+                raise InputError(
+                    f"market {self.market} does not support Binance reference feed; choose hyperliquid"
+                )
+            return "binance", self.binance_symbol
+        raise InputError(
+            f"unsupported reference feed {requested_feed!r}; choose binance or hyperliquid"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,12 +114,24 @@ class _MarketsFrame(BaseModel):
     contents: _MarketsContents
 
 
+EQUITY_TICK_TIERS: Final = (
+    TickTier(Decimal("5000"), Decimal("0.01")),
+    TickTier(Decimal("10000"), Decimal("0.02")),
+    TickTier(Decimal("20000"), Decimal("0.05")),
+    TickTier(Decimal("50000"), Decimal("0.1")),
+    TickTier(Decimal("100000"), Decimal("0.2")),
+    TickTier(None, Decimal("0.5")),
+)
+
+
 MARKET_MAPPINGS: Final = {
     "BTC-USD": MarketMapping(
         market="BTC-USD",
         market_id=1,
         base_asset="BTC",
         binance_symbol="BTCUSDT",
+        hyperliquid_symbol="BTC",
+        default_feed="binance",
         tick_size=Decimal("0.1"),
         step_size=Decimal("0.00000001"),
         min_order_size=Decimal("0.0001"),
@@ -116,6 +151,8 @@ MARKET_MAPPINGS: Final = {
         market_id=2,
         base_asset="ETH",
         binance_symbol="ETHUSDT",
+        hyperliquid_symbol="ETH",
+        default_feed="binance",
         tick_size=Decimal("0.01"),
         step_size=Decimal("0.0000001"),
         min_order_size=Decimal("0.001"),
@@ -135,6 +172,8 @@ MARKET_MAPPINGS: Final = {
         market_id=8,
         base_asset="ZEC",
         binance_symbol="ZECUSDT",
+        hyperliquid_symbol=None,
+        default_feed="binance",
         tick_size=Decimal("0.001"),
         step_size=Decimal("0.000001"),
         min_order_size=Decimal("0.01"),
@@ -142,23 +181,97 @@ MARKET_MAPPINGS: Final = {
         max_order_size=Decimal("1000000"),
         tick_tiers=(TickTier(None, Decimal("0.001")),),
     ),
-    "AMZN-USD": MarketMapping(
-        market="AMZN-USD",
-        market_id=31,
-        base_asset="AMZN",
-        binance_symbol="AMZNUSDT",
+    "HOOD-USD": MarketMapping(
+        market="HOOD-USD",
+        market_id=18,
+        base_asset="HOOD",
+        binance_symbol=None,
+        hyperliquid_symbol="xyz:HOOD",
+        default_feed="hyperliquid",
+        tick_size=Decimal("0.01"),
+        step_size=Decimal("0.0000001"),
+        min_order_size=Decimal("0.1"),
+        min_order_notional=Decimal("5"),
+        max_order_size=Decimal("1000000"),
+        tick_tiers=EQUITY_TICK_TIERS,
+    ),
+    "CRCL-USD": MarketMapping(
+        market="CRCL-USD",
+        market_id=19,
+        base_asset="CRCL",
+        binance_symbol=None,
+        hyperliquid_symbol="xyz:CRCL",
+        default_feed="hyperliquid",
         tick_size=Decimal("0.01"),
         step_size=Decimal("0.0000001"),
         min_order_size=Decimal("0.01"),
         min_order_notional=Decimal("5"),
         max_order_size=Decimal("100000"),
-        tick_tiers=(TickTier(None, Decimal("0.01")),),
+        tick_tiers=EQUITY_TICK_TIERS,
+    ),
+    "NVDA-USD": MarketMapping(
+        market="NVDA-USD",
+        market_id=28,
+        base_asset="NVDA",
+        binance_symbol=None,
+        hyperliquid_symbol="xyz:NVDA",
+        default_feed="hyperliquid",
+        tick_size=Decimal("0.01"),
+        step_size=Decimal("0.0000001"),
+        min_order_size=Decimal("0.01"),
+        min_order_notional=Decimal("5"),
+        max_order_size=Decimal("100000"),
+        tick_tiers=EQUITY_TICK_TIERS,
+    ),
+    "AMZN-USD": MarketMapping(
+        market="AMZN-USD",
+        market_id=31,
+        base_asset="AMZN",
+        binance_symbol="AMZNUSDT",
+        hyperliquid_symbol="xyz:AMZN",
+        default_feed="hyperliquid",
+        tick_size=Decimal("0.01"),
+        step_size=Decimal("0.0000001"),
+        min_order_size=Decimal("0.01"),
+        min_order_notional=Decimal("5"),
+        max_order_size=Decimal("100000"),
+        tick_tiers=EQUITY_TICK_TIERS,
+    ),
+    "SNDK-USD": MarketMapping(
+        market="SNDK-USD",
+        market_id=33,
+        base_asset="SNDK",
+        binance_symbol=None,
+        hyperliquid_symbol="xyz:SNDK",
+        default_feed="hyperliquid",
+        tick_size=Decimal("0.01"),
+        step_size=Decimal("0.0000001"),
+        min_order_size=Decimal("0.01"),
+        min_order_notional=Decimal("5"),
+        max_order_size=Decimal("100000"),
+        tick_tiers=EQUITY_TICK_TIERS,
+    ),
+    "DRAM-USD": MarketMapping(
+        market="DRAM-USD",
+        market_id=34,
+        base_asset="DRAM",
+        binance_symbol=None,
+        hyperliquid_symbol="xyz:DRAM",
+        default_feed="hyperliquid",
+        tick_size=Decimal("0.01"),
+        step_size=Decimal("0.0000001"),
+        min_order_size=Decimal("0.01"),
+        min_order_notional=Decimal("5"),
+        max_order_size=Decimal("100000"),
+        tick_tiers=EQUITY_TICK_TIERS,
     ),
     "NEAR-USD": MarketMapping(
         market="NEAR-USD",
         market_id=56,
         base_asset="NEAR",
         binance_symbol="NEARUSDT",
+        hyperliquid_symbol="NEAR",
+        default_feed="binance",
         tick_size=Decimal("0.001"),
         step_size=Decimal("0.000001"),
         min_order_size=Decimal("0.1"),

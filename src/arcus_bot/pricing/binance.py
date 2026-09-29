@@ -37,6 +37,11 @@ class BinanceBookTicker:
         """Return the best-bid/ask midpoint."""
         return (self.bid + self.ask) / 2
 
+    @property
+    def fair_anchor(self) -> Decimal:
+        """Return the fair-value anchor price."""
+        return self.mid
+
 
 class _BookTickerFrame(BaseModel):
     """Validated raw Binance bookTicker payload."""
@@ -105,6 +110,7 @@ def parse_book_ticker(
 class BinanceBookTickerFeed:
     """Reconnect and cache one explicitly configured Binance BBO stream."""
 
+    feed_name: ClassVar[str] = "Binance"
     symbol: str
     latest: BinanceBookTicker | None
 

@@ -6,7 +6,7 @@ import argparse
 import hashlib
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Final
@@ -46,6 +46,8 @@ class MakerArguments(argparse.Namespace):
     candidate_mode: str = "off"
     max_alpha_bps: str = "0"
     alpha_report_path: str = ""
+    reference_feed: str = "auto"
+    preview_feeds: bool = False
     dry_run: bool = False
     submit: bool = False
     mainnet: bool = False
@@ -79,6 +81,9 @@ class MakerOptions:
     max_alpha_bps: Decimal = Decimal("0")
     alpha_report_path: str = ""
     alpha_report_data: JsonObject | None = None
+    reference_feed: str = "auto"
+    market_feeds: dict[str, tuple[str, str]] = field(default_factory=dict)
+    preview_feeds: bool = False
 
 
 MakerConfig = MakerOptions
@@ -149,6 +154,43 @@ def verify_authentic_go_report(
     if any(data.get(key) != value for key, value in replay.items()):
         return False, "report summary does not match source replay", None
     return True, "recomputed GO from fresh hash-bound observations", data
+
+
+def parse_reference_feed(
+    raw_feed: str,
+    mappings: tuple[MarketMapping, ...],
+) -> dict[str, tuple[str, str]]:
+    """Resolve (feed_type, symbol) for each configured market mapping."""
+    cleaned = raw_feed.strip().lower()
+    feed_map: dict[str, tuple[str, str]] = {}
+    if "=" in cleaned:
+        overrides: dict[str, str] = {}
+        for item in raw_feed.split(","):
+            part = item.strip()
+            if not part:
+                continue
+            if "=" not in part:
+                raise InputError(f"invalid market=feed format in --reference-feed: {part!r}")
+            mkt, feed = part.split("=", 1)
+            mkt_clean = mkt.strip().upper()
+            feed_clean = feed.strip().lower()
+            if feed_clean not in ("binance", "hyperliquid", "auto"):
+                raise InputError(
+                    f"unsupported feed {feed_clean!r} for market {mkt_clean}; choose binance or hyperliquid"
+                )
+            overrides[mkt_clean] = feed_clean
+        for mapping in mappings:
+            target_feed = overrides.get(mapping.market, "auto")
+            feed_type, feed_sym = mapping.resolve_feed(target_feed)
+            feed_map[mapping.market] = (feed_type, feed_sym)
+    else:
+        if cleaned not in ("auto", "binance", "hyperliquid"):
+            raise InputError(f"unsupported reference feed {raw_feed!r}; choose binance or hyperliquid")
+        for mapping in mappings:
+            target_feed = None if cleaned == "auto" else cleaned
+            feed_type, feed_sym = mapping.resolve_feed(target_feed)
+            feed_map[mapping.market] = (feed_type, feed_sym)
+    return feed_map
 
 
 def _decimal(value: str, label: str, *, allow_negative: bool = False) -> Decimal:
@@ -231,6 +273,16 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
         help="Path to authentic GO alpha evaluation report (required for bounded mode).",
     )
     _ = parser.add_argument(
+        "--reference-feed",
+        default="auto",
+        help="Reference pricing feed engine (auto, binance, hyperliquid, or MARKET=feed; default: auto).",
+    )
+    _ = parser.add_argument(
+        "--preview-feeds",
+        action="store_true",
+        help="Safe non-trading live preview of reference feeds and Arcus orderbooks.",
+    )
+    _ = parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Explicitly select the default non-trading preview mode.",
@@ -254,7 +306,7 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
 
     if args.submit and args.dry_run:
         raise InputError("choose either --submit or --dry-run")
-    if args.mainnet and not args.submit:
+    if args.mainnet and not args.submit and not args.preview_feeds:
         raise InputError("--mainnet requires --submit")
     if args.duration_seconds < 0:
         raise InputError("--duration-seconds cannot be negative")
@@ -350,6 +402,8 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
         if not signing_key:
             raise InputError("set ARCUS_API_SIGNING_KEY before using --submit")
 
+    market_feeds = parse_reference_feed(args.reference_feed, tuple(mappings))
+
     return MakerOptions(
         markets=tuple(mappings),
         account_address=account_address,
@@ -374,4 +428,7 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
         max_alpha_bps=max_alpha_bps,
         alpha_report_path=alpha_report_path,
         alpha_report_data=alpha_report_data,
+        reference_feed=args.reference_feed,
+        market_feeds=market_feeds,
+        preview_feeds=args.preview_feeds,
     )

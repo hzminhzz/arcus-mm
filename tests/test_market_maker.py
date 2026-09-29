@@ -1338,7 +1338,7 @@ def _make_test_maker(
     max_alpha_bps: Decimal | None = None,
     alpha_report_data: JsonObject | None = None,
     submit: bool = False,
-) -> ContinuousMaker:
+) -> ContinuousMaker[BinanceBookTickerFeed]:
     client = _FakeMakerClient()
     orders = _FakeMakerOrders(client) if submit else None
     mapping = MARKET_MAPPINGS["BTC-USD"]

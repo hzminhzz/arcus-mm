@@ -1649,6 +1649,26 @@ def test_baseline_stale_pauses_quotes(tmp_path: Path) -> None:
     assert "open-order-1" in maker.orders.cancelled
 
 
+def test_persistent_stale_feed_forces_session_reconnect() -> None:
+    maker = _make_test_maker(
+        candidate_mode="off",
+        submit=False,
+    )
+    maker.feed.latest = parse_book_ticker(
+        '{"s":"BTCUSDT","b":"83000","a":"83010","B":"3.0","A":"1.0"}',
+        "BTCUSDT",
+        1_500_000_000,
+    )
+    maker.client.orderbook.best_bid = Decimal("83000")
+    maker.client.orderbook.best_ask = Decimal("83010")
+    maker.client.orderbook.received_at_ns = 2_000_000_000
+
+    _ = anyio.run(maker.step, 2_000_000_000)
+    _ = anyio.run(maker.step, 4_001_000_000)
+    with pytest.raises(OSError, match="market data remained stale"):
+        _ = anyio.run(maker.step, 6_002_000_000)
+
+
 def test_live_submission_supports_continuous_mode_and_rejects_negative_duration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -83,6 +83,8 @@ class ContinuousMaker:
     last_non_go_reason: str = ""
     starting_equity: Decimal | None = None
     session_started: bool = False
+    stale_since_ns: int = 0
+    stale_reason: str = ""
 
     def __post_init__(self) -> None:
         self.basis = BasisEstimator(
@@ -178,7 +180,11 @@ class ContinuousMaker:
         )
         if reason is not None:
             await self.pause(reason)
+            if self._stale_duration_exceeded(reason, current_time_ns):
+                raise OSError(f"market data remained stale: {reason}")
             return None
+        self.stale_since_ns = 0
+        self.stale_reason = ""
         if reference is None:
             raise ProtocolError("freshness check accepted a missing Binance reference")
 
@@ -332,6 +338,22 @@ class ContinuousMaker:
         await self.order_manager.reconcile(quotes, effective_fair_price, best_bid, best_ask)
         self.last_requote_at_ns = current_time_ns
         return quotes
+
+    def _stale_duration_exceeded(self, reason: str, now_ns: int) -> bool:
+        """Reconnect after a full freshness window without market data."""
+        if reason != self.stale_reason:
+            self.stale_reason = reason
+            self.stale_since_ns = now_ns
+            return False
+        if self.stale_since_ns == 0:
+            self.stale_since_ns = now_ns
+            return False
+        grace_ms = max(
+            self.runtime.maximum_feed_age_ms,
+            self.runtime.maximum_book_age_ms,
+            self.runtime.maximum_pair_skew_ms,
+        )
+        return now_ns - self.stale_since_ns >= grace_ms * 1_000_000
 
     async def _check_live_limits(self, now_ns: int) -> None:
         """Fail closed when live turnover or account-equity limits are reached."""

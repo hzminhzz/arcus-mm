@@ -176,6 +176,28 @@ def test_market_snapshot_validates_explicit_btc_mapping() -> None:
     assert info.tick_size_for(Decimal("100")) == Decimal("0.1")
 
 
+@pytest.mark.parametrize(
+    ("market", "market_id", "base_asset", "binance_symbol"),
+    [
+        ("ZEC-USD", 8, "ZEC", "ZECUSDT"),
+        ("AMZN-USD", 31, "AMZN", "AMZNUSDT"),
+        ("NEAR-USD", 56, "NEAR", "NEARUSDT"),
+    ],
+)
+def test_market_snapshot_validates_extended_mappings(
+    market: str, market_id: int, base_asset: str, binance_symbol: str
+) -> None:
+    # Given an online Arcus market with a supported Binance USD-M reference.
+    info = parse_market_snapshot(
+        market_snapshot(market_id, market, base_asset),
+        MARKET_MAPPINGS[market],
+    )
+
+    # Then the mapping keeps both venues aligned.
+    assert info.mapping.binance_symbol == binance_symbol
+    assert info.status == "ONLINE"
+
+
 def test_market_snapshot_rejects_wrong_arcus_market_id() -> None:
     # Given an ETH row carrying the wrong Arcus market ID.
     raw = market_snapshot(1, "ETH-USD", "ETH")
@@ -408,11 +430,15 @@ def test_account_state_counts_unique_realtime_fill_notional() -> None:
             "type": "channel_data",
             "channel": "userFills",
             "contents": {
-                "tradeId": "trade-2",
-                "orderId": "order-2",
-                "side": "SELL",
-                "price": "101",
-                "size": "0.2",
+                "fills": [
+                    {
+                        "tradeId": "trade-2",
+                        "orderId": "order-2",
+                        "side": "SELL",
+                        "price": "101",
+                        "size": "0.2",
+                    }
+                ],
             },
         }
     )
@@ -848,6 +874,26 @@ def test_cancel_open_orders_ignores_minimum_rest_interval() -> None:
     assert not manager.tracked_orders
 
 
+def test_cancel_open_orders_includes_order_created_before_timeout() -> None:
+    # Given an order accepted by Arcus before its placement response timed out.
+    client = _FakeMakerClient()
+    orders = _FakeMakerOrders(client)
+    client.state.open_orders.add("untracked-order")
+    manager = MakerOrderManager(
+        runtime=_runtime(submit=True),
+        market=MarketInfo(mapping=MARKET_MAPPINGS["BTC-USD"], status="ONLINE"),
+        client=client,
+        orders=orders,
+    )
+
+    # When the failed session performs its final safety cleanup.
+    anyio.run(manager.cancel_open_orders)
+
+    # Then the order is canceled even though placement never returned its ID.
+    assert orders.cancelled == ["untracked-order"]
+    assert not client.state.open_orders
+
+
 def test_projected_position_reserves_fillable_order_quantity() -> None:
     # Given a long position with an additional active bid near its USD cap.
     client = _FakeMakerClient()
@@ -871,6 +917,50 @@ def test_projected_position_reserves_fillable_order_quantity() -> None:
 
     # Then the still-fillable quantity is included in the hard cap.
     assert exceeds
+
+
+def test_reconcile_waits_for_position_after_fill_before_replacement() -> None:
+    # Given a filled quote whose account position update is one sequence behind.
+    client = _FakeMakerClient()
+    client.state.require_order_sequence = True
+    client.state.position_sequence = 10
+    client.state.order_states["order-1"] = OrderState(
+        status="FILLED",
+        filled_quantity=Decimal("0.2"),
+        average_fill_price=Decimal("100"),
+        side="SELL",
+        sequence_number=11,
+    )
+    orders = _FakeMakerOrders(client)
+    manager = MakerOrderManager(
+        runtime=_runtime(submit=True),
+        market=MarketInfo(mapping=MARKET_MAPPINGS["BTC-USD"], status="ONLINE"),
+        client=client,
+        orders=orders,
+        tracked_orders={
+            "order-1": Quote(
+                side="SELL",
+                price=Decimal("100"),
+                quantity=Decimal("0.2"),
+            )
+        },
+    )
+
+    # When reconciliation runs before the position channel catches up.
+    anyio.run(
+        manager.reconcile,
+        (Quote(side="SELL", price=Decimal("101"), quantity=Decimal("0.2")),),
+        Decimal("100"),
+        Decimal("99"),
+        Decimal("101"),
+    )
+
+    # Then it neither replaces the filled order nor increases exposure.
+    assert not orders.placed
+    assert not orders.cancelled
+    assert manager.tracked_orders == {
+        "order-1": Quote(side="SELL", price=Decimal("100"), quantity=Decimal("0.2"))
+    }
 
 
 def test_freshness_gate_rejects_missing_and_stale_feeds() -> None:
@@ -1050,6 +1140,32 @@ def test_inventory_skew_keeps_profitable_unwinding_sell() -> None:
     assert len(quotes) == 1
     assert quotes[0].side == "SELL"
     assert quotes[0].price >= Decimal("83037.35")
+
+
+def test_inventory_skew_keeps_positive_edge_unwinding_sell() -> None:
+    # Given long inventory that moves a profitable ask below the normal target edge.
+    info = MarketInfo(mapping=MARKET_MAPPINGS["BTC-USD"], status="ONLINE")
+    context = QuoteContext(
+        market=info,
+        config=MakerQuoteConfig(
+            order_size_usd=Decimal("10"),
+            maximum_position_usd=Decimal("100"),
+            maker_fee_bps=Decimal("0"),
+            minimum_edge_bps=Decimal("5"),
+            latency_buffer_bps=Decimal("3"),
+            inventory_skew_bps=Decimal("20"),
+        ),
+        fair_price=Decimal("100"),
+        best_bid=Decimal("99.9"),
+        best_ask=Decimal("100.1"),
+        position=Decimal("0.3"),
+    )
+
+    quotes = calculate_quotes(context)
+
+    # The ask still has positive net edge and reduces long inventory.
+    sell_quote = next(quote for quote in quotes if quote.side == "SELL")
+    assert sell_quote.price > context.fair_price
 
 
 def test_per_order_cap_prevents_dust_cleanup_from_oversizing() -> None:
@@ -1548,10 +1664,13 @@ def test_live_submission_supports_continuous_mode_and_rejects_negative_duration(
         _ = parse_options([*base_args, "--duration-seconds", "-1"])
 
 
-def test_live_submission_restricts_to_btc_usd() -> None:
-    # Given live submission arguments attempting to trade ETH-USD.
+def test_live_submission_accepts_extended_market(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given live submission arguments for a supported non-BTC market.
+    monkeypatch.setenv("ARCUS_API_SIGNING_KEY", "test-signing-key")
     argv = [
-        "--markets", "ETH-USD",
+        "--markets", "NEAR-USD",
         "--account-address", "0x1234567890abcdef1234567890abcdef12345678",
         "--order-size-usd", "10",
         "--max-position-usd", "40",
@@ -1566,10 +1685,10 @@ def test_live_submission_restricts_to_btc_usd() -> None:
         "--submit",
     ]
 
-    # When parsing a non-BTC live submission.
-    # Then it is rejected immediately.
-    with pytest.raises(InputError, match="--submit is restricted to BTC-USD"):
-        _ = parse_options(argv)
+    # When parsing a live submission.
+    # Then the selected extended market is accepted.
+    options = parse_options(argv)
+    assert options.markets == (MARKET_MAPPINGS["NEAR-USD"],)
 
 
 def test_live_submission_loss_limit_cannot_exceed_max_position() -> None:

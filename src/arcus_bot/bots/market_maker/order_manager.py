@@ -64,6 +64,8 @@ class MakerOrderManager:
             raise ProtocolError(
                 "Arcus reported unmanaged open orders; refusing to take ownership"
             )
+        if self._position_update_pending():
+            return
 
         for order_id, current in tuple(self.tracked_orders.items()):
             state = self.client.state.order_states.get(order_id)
@@ -147,6 +149,17 @@ class MakerOrderManager:
             self.placed_at_ns[order_id] = monotonic_ns()
             return
 
+    def _position_update_pending(self) -> bool:
+        """Wait for Arcus position state before replacing a filled quote."""
+        if not self.client.state.require_order_sequence:
+            return False
+        position_sequence = self.client.state.position_sequence
+        return any(
+            state.filled_quantity > 0
+            and state.sequence_number > position_sequence
+            for state in self.client.state.order_states.values()
+        )
+
     def committed_traded_notional(self) -> Decimal:
         """Include fills, fill updates awaiting trade events, and working quotes."""
         committed = self.client.state.cumulative_traded_notional_usd
@@ -199,8 +212,9 @@ class MakerOrderManager:
                 return maximum_long > maximum or maximum_short < -maximum
 
     async def cancel_open_orders(self) -> None:
-        """Cancel and confirm only orders placed by this maker session."""
-        for order_id in tuple(self.tracked_orders):
+        """Cancel and confirm every order known on this owned market."""
+        order_ids = set(self.tracked_orders) | self.client.state.open_orders
+        for order_id in tuple(order_ids):
             await self.cancel_and_confirm(order_id)
             _ = self.tracked_orders.pop(order_id, None)
             _ = self.placed_at_ns.pop(order_id, None)

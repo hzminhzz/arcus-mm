@@ -1,4 +1,4 @@
-"""Run the BTC/ETH continuous Arcus market maker."""
+"""Run the continuous Arcus market maker."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 async def _run(options: MakerOptions) -> None:
-    """Validate live testnet market metadata, then run selected markets."""
+    """Validate live market metadata, then run selected markets."""
     market_info: list[MarketInfo] = []
     for mapping in options.markets:
         market_info.append(await fetch_market_info(mapping, options.mainnet))
@@ -80,7 +80,7 @@ async def _run(options: MakerOptions) -> None:
 
 
 def main() -> int:
-    """Run the BTC/ETH maker in dry-run mode or explicitly on testnet."""
+    """Run the maker in dry-run mode or explicitly on Arcus."""
     try:
         options = parse_options()
         configure_logging(options.log_level)

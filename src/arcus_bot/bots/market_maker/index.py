@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from time import monotonic_ns
+from typing import cast
 
 import anyio
 import websockets
@@ -70,6 +71,7 @@ class ContinuousMaker:
     alpha_report_path: str | Path | None = None
     alpha_report_data: JsonObject | None = None
     maximum_candidate_age_ms: int = 1_000
+    recover_existing_orders: bool = False
     order_manager: MakerOrderManager = field(init=False)
     basis: BasisEstimator = field(init=False)
     last_requote_at_ns: int = 0
@@ -80,6 +82,7 @@ class ContinuousMaker:
     last_candidate_quotes: tuple[Quote, ...] = ()
     last_non_go_reason: str = ""
     starting_equity: Decimal | None = None
+    session_started: bool = False
 
     def __post_init__(self) -> None:
         self.basis = BasisEstimator(
@@ -108,7 +111,7 @@ class ContinuousMaker:
                 raise ProtocolError("Arcus open-order snapshot was not received")
             if self.orders is None:
                 raise ProtocolError("live maker session has no Arcus order adapter")
-            if self.client.state.open_orders:
+            if self.client.state.open_orders and not self.recover_existing_orders:
                 raise ProtocolError(
                     f"Arcus reported existing {self.market.mapping.market} orders; "
                     + "refusing to take ownership"
@@ -116,9 +119,12 @@ class ContinuousMaker:
             if self.client.state.account_equity is None:
                 raise ProtocolError("Arcus account-equity snapshot was not received")
             self.starting_equity = self.client.state.account_equity
+            if self.recover_existing_orders:
+                await self.order_manager.cancel_open_orders()
         else:
             await self.client.subscribe("l2Orderbook", self.runtime.account.market)
 
+        self.session_started = True
         try:
             async with anyio.create_task_group() as task_group:
                 _ = task_group.start_soon(self.feed.run)
@@ -381,8 +387,10 @@ class ContinuousMaker:
 async def run_market(runtime: MakerRuntime, market: MarketInfo) -> None:
     """Run one market in the selected Arcus environment."""
     reconnect_seconds = 1
+    recover_existing_orders = False
     environment = "mainnet" if runtime.mainnet else "testnet"
     while True:
+        maker: ContinuousMaker | None = None
         remaining_seconds: float | None = None
         if runtime.run_deadline_ns is not None:
             remaining_seconds = (
@@ -417,6 +425,7 @@ async def run_market(runtime: MakerRuntime, market: MarketInfo) -> None:
                     client=client,
                     feed=BinanceBookTickerFeed(market.mapping.binance_symbol),
                     orders=orders,
+                    recover_existing_orders=recover_existing_orders,
                 )
                 if runtime.run_deadline_ns is None:
                     await maker.run()
@@ -431,12 +440,26 @@ async def run_market(runtime: MakerRuntime, market: MarketInfo) -> None:
                         return
                 return
         except (OSError, TimeoutError, websockets.WebSocketException) as error:
+            if maker is not None and maker.session_started:
+                recover_existing_orders = True
             logger.warning(
                 "Arcus %s disconnected for %s; reconnecting in %ss: %s",
                 environment,
                 market.mapping.market,
                 reconnect_seconds,
                 error,
+            )
+        except BaseExceptionGroup as errors:
+            if not _recoverable_errors(errors):
+                raise
+            if maker is not None and maker.session_started:
+                recover_existing_orders = True
+            logger.warning(
+                "Arcus %s session failed for %s; reconnecting in %ss: %s",
+                environment,
+                market.mapping.market,
+                reconnect_seconds,
+                errors,
             )
         delay_seconds = reconnect_seconds
         if runtime.run_deadline_ns is not None:
@@ -448,6 +471,17 @@ async def run_market(runtime: MakerRuntime, market: MarketInfo) -> None:
             delay_seconds = min(delay_seconds, remaining_seconds)
         await anyio.sleep(delay_seconds)
         reconnect_seconds = min(reconnect_seconds * 2, 30)
+
+
+def _recoverable_errors(error: BaseExceptionGroup[BaseException]) -> bool:
+    """Identify transport/RPC failures that can safely restart a session."""
+    for item in error.exceptions:
+        if isinstance(item, BaseExceptionGroup):
+            if not _recoverable_errors(cast(BaseExceptionGroup[BaseException], item)):
+                return False
+        elif not isinstance(item, (OSError, TimeoutError, websockets.WebSocketException)):
+            return False
+    return True
 
 
 def freshness_reason(

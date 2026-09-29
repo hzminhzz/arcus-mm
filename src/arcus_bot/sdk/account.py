@@ -212,7 +212,11 @@ class AccountState:
             if isinstance(rows, list):
                 fill_rows = [row for row in rows if isinstance(row, dict)]
         else:
-            fill_rows = [contents]
+            rows = contents.get("fills")
+            if isinstance(rows, list):
+                fill_rows = [row for row in rows if isinstance(row, dict)]
+            elif any(key in contents for key in ("tradeId", "orderId", "side")):
+                fill_rows = [contents]
         for row in fill_rows:
             trade_id = row.get("tradeId")
             order_id = row.get("orderId")
@@ -222,7 +226,7 @@ class AccountState:
                 or not isinstance(order_id, str)
                 or not isinstance(side, str)
             ):
-                if message_type == "channel_data":
+                if message_type == "channel_data" and row is contents:
                     raise ProtocolError("Arcus fill update omitted trade, order, or side")
                 continue
             if side not in {"BUY", "SELL"}:

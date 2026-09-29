@@ -168,7 +168,7 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
     """Parse explicit markets, quote economics, and hard limits."""
     parser = argparse.ArgumentParser(
         description=(
-            "Run the continuous BTC/ETH Arcus maker. "
+            "Run the continuous Arcus maker. "
             "Testnet dry-run is the default; --submit is required for order placement."
         )
     )
@@ -274,13 +274,12 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
     requested = tuple(symbol.strip().upper() for symbol in args.markets.split(","))
     if not requested or len(requested) != len(set(requested)):
         raise InputError("--markets must contain unique supported market symbols")
-    if args.submit and requested != ("BTC-USD",):
-        raise InputError("--submit is restricted to BTC-USD")
     mappings: list[MarketMapping] = []
     for symbol in requested:
         mapping = MARKET_MAPPINGS.get(symbol)
         if mapping is None:
-            raise InputError(f"unsupported Arcus market {symbol!r}; choose BTC-USD or ETH-USD")
+            supported = ", ".join(sorted(MARKET_MAPPINGS))
+            raise InputError(f"unsupported Arcus market {symbol!r}; choose {supported}")
         mappings.append(mapping)
 
     order_size = _decimal(args.order_size_usd, "--order-size-usd")

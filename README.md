@@ -40,9 +40,9 @@ book terminal monitor.
 The repository exposes three CLI entry points:
 
 1. **`arcus-maker`**: Continuous quoting market maker for `BTC-USD` and `ETH-USD`.
-   Consumes Binance USD-M futures public order book tickers (`BTCUSDT`, `ETHUSDT`)
-   as external fair value references, adjusts prices for fee economics, inventory
-   skew, and latency buffers, and submits resting bid/ask limit quotes on Arcus.
+    Consumes Binance USD-M futures public order book tickers as external fair
+    value references, adjusts prices for fee economics, inventory skew, and
+    latency buffers, and submits resting bid/ask limit quotes on Arcus.
 2. **`arcus-bot`**: Multi-limit directional grid trading bot. Places passive entry
    limit orders, attaches take-profit limit orders upon fills, and spaces orders
    according to a configurable percentage grid step.
@@ -152,8 +152,10 @@ set +a
 `arcus-maker` quotes two-sided liquidity around a reference price:
 
 1. **Binance Reference**: Subscribes to real-time `bookTicker` events from
-   Binance USD-M Futures (`wss://fstream.binance.com/public/ws`) for `BTCUSDT`
-   and `ETHUSDT`.
+   Binance USD-M Futures (`wss://fstream.binance.com/public/ws`) for the
+   configured market's matching symbol. Supported mappings currently include
+   `BTC-USD`/`BTCUSDT`, `ETH-USD`/`ETHUSDT`, `ZEC-USD`/`ZECUSDT`,
+   `AMZN-USD`/`AMZNUSDT`, and `NEAR-USD`/`NEARUSDT`.
 2. **Basis Adjustment**: Tracks rolling median basis differences between Arcus
    and Binance to account for persistent exchange spread divergences.
 3. **Economic Pricing**:
@@ -171,7 +173,7 @@ set +a
 
 | Flag | Required | Default | Description |
 |---|---|---|---|
-| `--markets` | No | `BTC-USD,ETH-USD` | Comma-separated Arcus markets: `BTC-USD`, `ETH-USD`. |
+| `--markets` | No | `BTC-USD,ETH-USD` | Comma-separated supported markets: `BTC-USD`, `ETH-USD`, `ZEC-USD`, `AMZN-USD`, `NEAR-USD`. |
 | `--order-size-usd` | **Yes** | — | Order notional per quote in USD (e.g. `40`). |
 | `--max-position-usd` | **Yes** | — | Maximum net position allowed in USD (e.g. `400`). |
 | `--maker-fee-bps` | **Yes** | — | Arcus maker fee in bps (can be `0` or negative for rebates). |

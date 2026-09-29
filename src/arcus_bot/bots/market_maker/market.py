@@ -1,4 +1,4 @@
-"""Verified Arcus perpetual market mappings and live testnet metadata."""
+"""Verified Arcus perpetual market mappings and live market metadata."""
 
 from __future__ import annotations
 
@@ -129,6 +129,42 @@ MARKET_MAPPINGS: Final = {
             TickTier(Decimal("200000"), Decimal("0.2")),
             TickTier(None, Decimal("0.5")),
         ),
+    ),
+    "ZEC-USD": MarketMapping(
+        market="ZEC-USD",
+        market_id=8,
+        base_asset="ZEC",
+        binance_symbol="ZECUSDT",
+        tick_size=Decimal("0.001"),
+        step_size=Decimal("0.000001"),
+        min_order_size=Decimal("0.01"),
+        min_order_notional=Decimal("5"),
+        max_order_size=Decimal("1000000"),
+        tick_tiers=(TickTier(None, Decimal("0.001")),),
+    ),
+    "AMZN-USD": MarketMapping(
+        market="AMZN-USD",
+        market_id=31,
+        base_asset="AMZN",
+        binance_symbol="AMZNUSDT",
+        tick_size=Decimal("0.01"),
+        step_size=Decimal("0.0000001"),
+        min_order_size=Decimal("0.01"),
+        min_order_notional=Decimal("5"),
+        max_order_size=Decimal("100000"),
+        tick_tiers=(TickTier(None, Decimal("0.01")),),
+    ),
+    "NEAR-USD": MarketMapping(
+        market="NEAR-USD",
+        market_id=56,
+        base_asset="NEAR",
+        binance_symbol="NEARUSDT",
+        tick_size=Decimal("0.001"),
+        step_size=Decimal("0.000001"),
+        min_order_size=Decimal("0.1"),
+        min_order_notional=Decimal("5"),
+        max_order_size=Decimal("10000000"),
+        tick_tiers=(TickTier(None, Decimal("0.001")),),
     ),
 }
 

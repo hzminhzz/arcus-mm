@@ -242,7 +242,12 @@ def calculate_quotes(context: QuoteContext) -> tuple[Quote, ...]:
                 edge_bps = (price - fair) * _BPS / fair - config.maker_fee_bps
                 is_passive = price > bid
         if edge_bps < config.minimum_edge_bps + config.latency_buffer_bps:
-            continue
+            is_inventory_reducing = (
+                (side == "SELL" and context.position > 0)
+                or (side == "BUY" and context.position < 0)
+            )
+            if not is_inventory_reducing or edge_bps < 0:
+                continue
         if not is_passive:
             continue
         quotes.append(Quote(side=side, price=price, quantity=aligned_quantity))

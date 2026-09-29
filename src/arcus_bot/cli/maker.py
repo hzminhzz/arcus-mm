@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 import uuid
 
 import anyio
@@ -23,6 +24,16 @@ async def _run(options: MakerOptions) -> None:
     market_info: list[MarketInfo] = []
     for mapping in options.markets:
         market_info.append(await fetch_market_info(mapping, options.mainnet))
+    run_deadline_ns = (
+        time.monotonic_ns() + options.duration_seconds * 1_000_000_000
+        if options.duration_seconds > 0
+        else None
+    )
+    run_expiration_time_us = (
+        time.time_ns() // 1_000 + options.duration_seconds * 1_000_000
+        if options.duration_seconds > 0
+        else None
+    )
     async with anyio.create_task_group() as task_group:
         for info in market_info:
             mapping = info.mapping
@@ -46,8 +57,16 @@ async def _run(options: MakerOptions) -> None:
                 maximum_pair_skew_ms=options.maximum_pair_skew_ms,
                 requote_interval_ms=options.requote_interval_ms,
                 minimum_order_rest_ms=options.minimum_order_rest_ms,
-                dry_run_duration_seconds=options.duration_seconds,
+                duration_seconds=options.duration_seconds,
+                run_deadline_ns=run_deadline_ns,
+                run_expiration_time_us=run_expiration_time_us,
+                max_traded_notional_usd=options.max_traded_notional_usd,
+                max_loss_usd=options.max_loss_usd,
                 mainnet=options.mainnet,
+                candidate_mode=options.candidate_mode,
+                max_alpha_bps=options.max_alpha_bps,
+                alpha_report_path=options.alpha_report_path,
+                alpha_report_data=options.alpha_report_data,
             )
             logger.info(
                 "%s Arcus %s market=%s id=%s Binance=%s",

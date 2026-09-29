@@ -186,3 +186,59 @@ SIGINT shutdown to cancel and confirm maker orders. A stop does not flatten any
 BTC or ETH position. Check Arcus positions and open orders after both start and
 stop. To keep it across logout, the user manager must support lingering:
 `loginctl enable-linger "$USER"` (requires administrator authorization).
+
+## Alpha evaluation and operator safety
+
+Operators can record public market feeds, evaluate candidate alpha models offline, and test candidate quoting in shadow mode without disturbing active production services.
+
+### Safe shadow mode inspection
+
+To observe candidate pricing on a VPS or local machine without altering live orders:
+
+```bash
+uv run arcus-maker \
+  --markets BTC-USD \
+  --candidate-mode shadow \
+  --dry-run
+```
+
+Shadow mode runs candidate quoter logic alongside the production baseline, logging side-by-side comparisons of alpha offsets and quote spreads. Because `--dry-run` is active, it places no orders. If run in live mode with `--submit`, shadow mode places only baseline orders, keeping live order placement insulated from candidate shifts.
+
+### Public data recording
+
+Collect public order book events from Arcus and Binance over a bounded window:
+
+```bash
+uv run python -m arcus_bot.alpha.record \
+  --markets BTC-USD,ETH-USD \
+  --duration-seconds 12 \
+  --max-bytes 1048576 \
+  --output .omo/evidence/arcus-maker-alpha/public.jsonl
+```
+
+The recorder captures public websockets with monotonic nanosecond receipt stamps. It runs completely outside the trading service and needs no API credentials.
+
+### Point-in-time replay evaluation
+
+Evaluate alpha candidates offline against historical public book data and fill records:
+
+```bash
+uv run python -m arcus_bot.alpha.replay \
+  --input .omo/evidence/arcus-maker-alpha/public.jsonl \
+  --fills .omo/evidence/arcus-maker-alpha/fills.jsonl \
+  --output .omo/evidence/arcus-maker-alpha/replay.json
+```
+
+Replay evaluation enforces strict decision thresholds:
+
+- **Synthetic fills force NO_GO**: Simulated or counterfactual fills can never certify a GO decision. They cannot capture real queue priority or adverse selection. Any non-observed fill provenance results in an immediate NO_GO.
+- **Data scarcity yields INCONCLUSIVE**: Evaluations require at least 30 observed fills per policy and at least 100 independent decisions. If thresholds are not met, the verdict is INCONCLUSIVE. After-cost markouts require separately observed fills under both policies in comparable regimes.
+- **Operator review is required**: Replay reports inform operators but do not automate deployment. Any live rollout requires human operator inspection and sign-off.
+
+### Production non-disruption guarantees
+
+VPS deployments follow strict operational boundaries:
+
+- **Running maker is untouched**: Never restart or interrupt `arcus-maker.service` while investigating candidates. The live service maintains active quotes and positions.
+- **Service file remains unchanged**: `deploy/arcus-maker.service` keeps candidate mode disabled by default (`candidate-mode off`). The default fallback is turning candidate mode off rather than restarting the process.
+- **No unverified mainnet claims**: Testnet observations never imply mainnet profitability. Keep evaluation isolated to dry runs and recorded replays until real evidence is reviewed.

@@ -108,6 +108,8 @@ class MakerQuoteConfig:
     def __post_init__(self) -> None:
         if self.order_size_usd <= 0 or self.maximum_position_usd <= 0:
             raise InputError("order size and maximum position must be positive")
+        if self.order_size_usd > self.maximum_position_usd:
+            raise InputError("order size cannot exceed the maximum position")
         if self.minimum_edge_bps < 0 or self.latency_buffer_bps < 0:
             raise InputError("minimum edge and latency buffer cannot be negative")
         if self.inventory_skew_bps < 0:
@@ -189,13 +191,40 @@ def calculate_quotes(context: QuoteContext) -> tuple[Quote, ...]:
         buy_room = min(buy_room, -context.position)
 
     desired_quantity = config.order_size_usd / fair
+    buy_quantity = min(desired_quantity, buy_room)
+    sell_quantity = min(desired_quantity, sell_room)
+
+    # When reducing an existing long position, avoid leaving un-tradeable dust:
+    if context.position > 0 and sell_room > 0:
+        remainder = context.position - sell_quantity
+        if remainder > 0 and (
+            remainder < market.mapping.min_order_size
+            or remainder * fair < market.mapping.min_order_notional
+        ):
+            sell_quantity = min(context.position, sell_room)
+
+    # When reducing an existing short position, avoid leaving un-tradeable dust:
+    if context.position < 0 and buy_room > 0:
+        abs_pos = abs(context.position)
+        remainder = abs_pos - buy_quantity
+        if remainder > 0 and (
+            remainder < market.mapping.min_order_size
+            or remainder * fair < market.mapping.min_order_notional
+        ):
+            buy_quantity = min(abs_pos, buy_room)
+
     candidates: tuple[tuple[Side, Decimal, Decimal], ...] = (
-        ("BUY", buy_price, min(desired_quantity, buy_room)),
-        ("SELL", sell_price, min(desired_quantity, sell_room)),
+        ("BUY", buy_price, buy_quantity),
+        ("SELL", sell_price, sell_quantity),
     )
     quotes: list[Quote] = []
     for side, price, quantity in candidates:
         aligned_quantity = _align_size(quantity, market.mapping.step_size)
+        per_order_quantity = _align_size(
+            config.order_size_usd / price,
+            market.mapping.step_size,
+        )
+        aligned_quantity = min(aligned_quantity, per_order_quantity)
         if aligned_quantity > market.mapping.max_order_size:
             aligned_quantity = _align_size(
                 market.mapping.max_order_size,

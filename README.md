@@ -21,6 +21,7 @@ book terminal monitor.
   - [Live Trading on Testnet](#live-trading-on-testnet)
   - [Live Trading on Mainnet](#live-trading-on-mainnet)
   - [Risk Limits and Resting Time](#risk-limits-and-resting-time)
+  - [Alpha Candidate Evaluation and Shadow Mode](#alpha-candidate-evaluation-and-shadow-mode)
 - [2. Multi-Limit Directional Grid Bot (`arcus-bot`)](#2-multi-limit-directional-grid-bot-arcus-bot)
   - [How It Works](#how-it-works-1)
   - [CLI Parameter Reference](#cli-parameter-reference-1)
@@ -29,6 +30,7 @@ book terminal monitor.
   - [Legacy Cycle Strategy](#legacy-cycle-strategy)
 - [3. Read-Only Account Monitor (`arcus-monitor`)](#3-read-only-account-monitor-arcus-monitor)
 - [Deployment and 24/7 Operations (systemd)](#deployment-and-247-operations-systemd)
+- [Alpha Research, Recording, and Replay](#alpha-research-recording-and-replay)
 - [Development and Testing](#development-and-testing)
 
 ---
@@ -186,6 +188,9 @@ set +a
 | `--basis-window-seconds`| No | `300` | Rolling window (seconds) for basis estimation. |
 | `--basis-samples` | No | `3` | Minimum basis samples required before quoting begins. |
 | `--duration-seconds` | No | `0` | Auto-stop preview after N seconds (`0` runs indefinitely). |
+| `--candidate-mode` | No | `off` | Alpha candidate evaluation mode (`off`, `shadow`, `bounded`). |
+| `--max-alpha-bps` | No | `0` | Maximum candidate alpha offset in basis points. |
+| `--alpha-report-path` | For bounded | `""` | Path to authentic GO alpha evaluation report (required for bounded mode). |
 | `--dry-run` | No | `True` | Non-trading preview mode (default). |
 | `--submit` | For live orders | `False`| Explicit opt-in flag required to place live orders. |
 | `--mainnet` | For mainnet | `False`| Route to Arcus mainnet (must be paired with `--submit`). |
@@ -260,6 +265,21 @@ uv run arcus-maker \
 - **Order Rest Time**: Controlled by `--minimum-order-rest-ms` (default 5000 ms).
   Healthy quotes are held to provide queue priority and avoid API spam. Unhealthy
   quotes (breached limits, crossed markets, stale feeds) are canceled immediately.
+
+### Alpha Candidate Evaluation and Shadow Mode
+
+The market maker supports evaluating pricing signals alongside the production baseline quoter without risking capital.
+
+Run shadow mode in a local dry run:
+
+```bash
+uv run arcus-maker \
+  --markets BTC-USD \
+  --candidate-mode shadow \
+  --dry-run
+```
+
+In shadow mode, the quoter computes candidate prices alongside baseline quotes. It logs side-by-side quote comparisons, including alpha offsets in basis points and resulting spreads. When run with `--submit`, shadow mode places only baseline quotes, so candidate logic has zero live order impact. Passing `--dry-run` guarantees no orders touch any exchange.
 
 ---
 
@@ -471,6 +491,58 @@ loginctl enable-linger "$USER"
 ```
 
 For extended VPS operational patterns, see [`VPS.md`](VPS.md).
+
+---
+
+## Alpha Research, Recording, and Replay
+
+The alpha evaluation pipeline lets operators record market conditions, test candidate signals against historical book states, and verify safety before considering live changes.
+
+### Public Data Recording CLI
+
+Operators can record synchronized Arcus and Binance market feeds using the standalone recorder:
+
+```bash
+uv run python -m arcus_bot.alpha.record \
+  --markets BTC-USD,ETH-USD \
+  --duration-seconds 12 \
+  --max-bytes 1048576 \
+  --output .omo/evidence/arcus-maker-alpha/public.jsonl
+```
+
+This recorder connects to public websockets on both exchanges. Top-of-book updates capture monotonic receipt timestamps (`recv_time_ns`) and exchange event times (`event_time_ms`). Output stops when reaching `--duration-seconds` or `--max-bytes`.
+
+### Point-in-Time Offline Replay and Evaluation CLI
+
+Replay recorded public book states against observed fill records:
+
+```bash
+uv run python -m arcus_bot.alpha.replay \
+  --input .omo/evidence/arcus-maker-alpha/public.jsonl \
+  --fills .omo/evidence/arcus-maker-alpha/fills.jsonl \
+  --output .omo/evidence/arcus-maker-alpha/replay.json
+```
+
+The replay engine scores candidate quotes against baseline markouts over a specified horizon (`--horizon-ms`, default 100 ms). It runs bootstrap confidence intervals, split-halves sign tests, and cost stress tests at 1x, 2x, and 3x fee multiples.
+
+Economics values in the JSON report are `null` when unavailable, not zero. `economics_status` labels each top-level markout, difference, bootstrap interval, and halves-stability field; each `cost_stress_results` multiplier has a `status` applying to its markouts, difference, and `positive` flag. Status is `unavailable` until paired observed fills and matching post-horizon books permit calculation, then `estimated`: future-mid markouts and their derived tests are estimates, not realized P&L. `measured` is reserved for directly observed quantities (for example, validated action latency provenance), not these projected economics. The report's input SHA-256 hashes bind self-authored files to the report but do not authenticate venue observations or independently prove fill provenance. A fixture/test `GO` exercises the decision gate only; it is never live performance evidence or deployment approval. The public-only capture has no fills and cannot support empirical paired-policy economics.
+
+### NO_GO and INCONCLUSIVE Decision Semantics
+
+The replay evaluator enforces strict risk gates before emitting a verdict:
+
+- **Synthetic fills trigger NO_GO**: Synthetic or counterfactual fills can never certify a GO decision. Simulated fills cannot model adverse selection, queue placement, or price impact. If any fill has a source or provenance other than `observed`, the evaluator flags an immediate `NO_GO`.
+- **Sparse data triggers INCONCLUSIVE**: The evaluator returns `INCONCLUSIVE` whenever observations fall below statistical thresholds (under 30 observed fills per policy or fewer than 100 independent book decisions). After-cost markouts require separately observed fills under both policies in comparable regimes.
+- **Cost stress and stability tests**: A candidate must show positive net markouts across all fee stress multiples (1x, 2x, 3x) and maintain consistent signs across chronological halves.
+- **Mandatory human operator review**: An automated report never authorizes deployment by itself. Live rollout requires separate operator review to inspect market regimes, fee tiers, and risk limits.
+
+### Operational Safety and Non-Disruption Guarantees
+
+The alpha workflow protects running production infrastructure:
+
+1. **Running bot remains untouched**: The live maker service runs independently. Local recording, replay, and dry-run shadow quoting do not send signals or share state with existing bot processes.
+2. **Service unit stays on safe default**: `deploy/arcus-maker.service` leaves `--candidate-mode` omitted, defaulting to `off`. Candidate mode "off" serves as the primary operational fallback, avoiding unplanned restarts.
+3. **Local candidate inspection**: Operators inspect candidate outputs locally using `--dry-run` or offline replay files without touching mainnet orders or altering production state. Testnet observations must not be confused with mainnet profitability.
 
 ---
 

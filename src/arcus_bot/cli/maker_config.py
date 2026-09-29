@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
+import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Final
 
 from arcus_bot.bots.market_maker.market import MARKET_MAPPINGS, MarketMapping
 from arcus_bot.bots.market_maker.quoter import MakerQuoteConfig
-from arcus_bot.types import InputError
+from arcus_bot.types import InputError, JsonObject, JSON_ADAPTER
 
 _HEX: Final = frozenset("0123456789abcdefABCDEF")
 _ZERO_ADDRESS: Final = "0x0000000000000000000000000000000000000000"
@@ -38,6 +41,11 @@ class MakerArguments(argparse.Namespace):
     basis_window_seconds: int = 300
     basis_samples: int = 3
     duration_seconds: int = 0
+    max_traded_notional_usd: str | None = None
+    max_loss_usd: str | None = None
+    candidate_mode: str = "off"
+    max_alpha_bps: str = "0"
+    alpha_report_path: str = ""
     dry_run: bool = False
     submit: bool = False
     mainnet: bool = False
@@ -61,10 +69,86 @@ class MakerOptions:
     basis_window_seconds: int
     basis_samples: int
     duration_seconds: int
+    max_traded_notional_usd: Decimal | None
+    max_loss_usd: Decimal | None
     submit: bool
     mainnet: bool
     signing_key: str | None
     log_level: str
+    candidate_mode: str = "off"
+    max_alpha_bps: Decimal = Decimal("0")
+    alpha_report_path: str = ""
+    alpha_report_data: JsonObject | None = None
+
+
+MakerConfig = MakerOptions
+
+
+def verify_authentic_go_report(
+    report_path: str | Path | None = None,
+    report_data: JsonObject | None = None,
+    max_age_seconds: float = 86400.0,
+) -> tuple[bool, str, JsonObject | None]:
+    """Recompute a fresh replay from hash-bound inputs, never trust summary claims."""
+    from arcus_bot.alpha.replay import evaluate_replay, load_jsonl
+
+    now = time.time()
+    if report_path and "fixture" in str(report_path).lower().replace("\\", "/"):
+        return False, "fixture reports cannot certify authentic GO", None
+    if report_data is None:
+        if not report_path:
+            return False, "no alpha evaluation report provided", None
+        path = Path(report_path)
+        if not path.is_file():
+            return False, f"alpha report file not found: {report_path}", None
+        try:
+            age = now - path.stat().st_mtime
+            if age < 0 or age > max_age_seconds:
+                return False, "alpha report file is stale or future-dated", None
+            parsed = JSON_ADAPTER.validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            return False, f"invalid alpha report: {exc}", None
+        if not isinstance(parsed, dict):
+            return False, "alpha report must be a JSON object", None
+        data = parsed
+    else:
+        data = report_data
+
+    if data.get("decision") != "GO":
+        return False, f"alpha report decision is {data.get('decision')}: {data.get('reason', '')}", None
+    generated = data.get("generated_at_ms")
+    if isinstance(generated, bool) or not isinstance(generated, int) or not 0 <= now * 1000 - generated <= max_age_seconds * 1000:
+        return False, "alpha report timestamp is missing, stale or future-dated", None
+    provenance = data.get("data_provenance")
+    if not isinstance(provenance, dict):
+        return False, "missing source/data provenance", None
+    try:
+        inputs: list[list[JsonObject]] = []
+        for name in ("public", "fills"):
+            source = provenance.get(f"{name}_path")
+            digest = provenance.get(f"{name}_sha256")
+            if not isinstance(source, str) or not Path(source).is_absolute() or not isinstance(digest, str):
+                return False, f"missing {name} source provenance", None
+            path = Path(source)
+            if "fixture" in str(path).lower().replace("\\", "/"):
+                return False, "fixture inputs cannot certify authentic GO", None
+            age = now - path.stat().st_mtime
+            if age < 0 or age > max_age_seconds:
+                return False, f"{name} input is stale or future-dated", None
+            if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                return False, f"{name} input hash mismatch", None
+            inputs.append(load_jsonl(path))
+        horizon = data.get("action_horizon_ms")
+        if isinstance(horizon, bool) or not isinstance(horizon, int) or horizon <= 0:
+            return False, "invalid action horizon", None
+        replay = evaluate_replay(inputs[0], inputs[1], action_horizon_ms=horizon)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return False, f"invalid replay provenance: {exc}", None
+    if replay["decision"] != "GO":
+        return False, f"source replay decision is {replay['decision']}: {replay['reason']}", None
+    if any(data.get(key) != value for key, value in replay.items()):
+        return False, "report summary does not match source replay", None
+    return True, "recomputed GO from fresh hash-bound observations", data
 
 
 def _decimal(value: str, label: str, *, allow_negative: bool = False) -> Decimal:
@@ -118,7 +202,33 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
         "--duration-seconds",
         type=int,
         default=0,
-        help="Stop a non-trading preview after this many seconds (0 means continuous).",
+        help="Bound run duration in seconds; live runs require 1-300 seconds.",
+    )
+    _ = parser.add_argument(
+        "--max-traded-notional-usd",
+        default=None,
+        help="Required for live runs; maximum cumulative gross fill notional in USD.",
+    )
+    _ = parser.add_argument(
+        "--max-loss-usd",
+        default=None,
+        help="Required for live runs; stop quoting at this account-equity drawdown.",
+    )
+    _ = parser.add_argument(
+        "--candidate-mode",
+        choices=("off", "shadow", "bounded"),
+        default="off",
+        help="Alpha candidate evaluation mode (off, shadow, bounded; default: off).",
+    )
+    _ = parser.add_argument(
+        "--max-alpha-bps",
+        default="0",
+        help="Maximum candidate alpha offset in basis points (default: 0).",
+    )
+    _ = parser.add_argument(
+        "--alpha-report-path",
+        default="",
+        help="Path to authentic GO alpha evaluation report (required for bounded mode).",
     )
     _ = parser.add_argument(
         "--dry-run",
@@ -146,8 +256,8 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
         raise InputError("choose either --submit or --dry-run")
     if args.mainnet and not args.submit:
         raise InputError("--mainnet requires --submit")
-    if args.duration_seconds < 0 or (args.submit and args.duration_seconds > 0):
-        raise InputError("--duration-seconds is only allowed for non-trading previews")
+    if args.duration_seconds < 0:
+        raise InputError("--duration-seconds cannot be negative")
     if args.account_index not in range(10):
         raise InputError("--account-index must be between 0 and 9")
     if min(
@@ -164,6 +274,8 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
     requested = tuple(symbol.strip().upper() for symbol in args.markets.split(","))
     if not requested or len(requested) != len(set(requested)):
         raise InputError("--markets must contain unique supported market symbols")
+    if args.submit and requested != ("BTC-USD",):
+        raise InputError("--submit is restricted to BTC-USD")
     mappings: list[MarketMapping] = []
     for symbol in requested:
         mapping = MARKET_MAPPINGS.get(symbol)
@@ -177,6 +289,23 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
         raise InputError("order size and maximum position must be positive")
     if order_size > maximum_position:
         raise InputError("--order-size-usd cannot exceed --max-position-usd")
+    maximum_traded_notional = (
+        _decimal(args.max_traded_notional_usd, "--max-traded-notional-usd")
+        if args.max_traded_notional_usd is not None
+        else None
+    )
+    maximum_loss = (
+        _decimal(args.max_loss_usd, "--max-loss-usd")
+        if args.max_loss_usd is not None
+        else None
+    )
+    if args.submit and maximum_traded_notional is not None and maximum_traded_notional <= 0:
+        raise InputError("--max-traded-notional-usd must be positive")
+    if args.submit and maximum_loss is not None:
+        if maximum_loss <= 0:
+            raise InputError("--max-loss-usd must be positive")
+        if maximum_loss > maximum_position:
+            raise InputError("--max-loss-usd cannot exceed --max-position-usd")
     quote_config = MakerQuoteConfig(
         order_size_usd=order_size,
         maximum_position_usd=maximum_position,
@@ -188,6 +317,28 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
     maximum_basis = _decimal(args.max_basis_bps, "--max-basis-bps")
     if maximum_basis <= 0:
         raise InputError("--max-basis-bps must be positive")
+
+    candidate_mode = args.candidate_mode
+    max_alpha_bps = _decimal(args.max_alpha_bps, "--max-alpha-bps")
+    if max_alpha_bps < 0:
+        raise InputError("--max-alpha-bps cannot be negative")
+
+    alpha_report_path = args.alpha_report_path.strip()
+    alpha_report_data: JsonObject | None = None
+    if candidate_mode == "bounded":
+        if not alpha_report_path:
+            raise InputError(
+                "bounded candidate mode requires a valid authentic GO evaluation report (--alpha-report-path)"
+            )
+        is_go, go_reason, alpha_report_data = verify_authentic_go_report(report_path=alpha_report_path)
+        if not is_go:
+            raise InputError(
+                f"bounded candidate mode rejected: authentic GO verification failed: {go_reason}"
+            )
+    elif alpha_report_path:
+        path = Path(alpha_report_path)
+        if not path.is_file():
+            raise InputError(f"--alpha-report-path file not found: {alpha_report_path}")
 
     account_address = _ZERO_ADDRESS
     signing_key: str | None = None
@@ -214,8 +365,14 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
         basis_window_seconds=args.basis_window_seconds,
         basis_samples=args.basis_samples,
         duration_seconds=args.duration_seconds,
+        max_traded_notional_usd=maximum_traded_notional,
+        max_loss_usd=maximum_loss,
         submit=args.submit,
         mainnet=args.mainnet,
         signing_key=signing_key,
         log_level=args.log_level,
+        candidate_mode=candidate_mode,
+        max_alpha_bps=max_alpha_bps,
+        alpha_report_path=alpha_report_path,
+        alpha_report_data=alpha_report_data,
     )

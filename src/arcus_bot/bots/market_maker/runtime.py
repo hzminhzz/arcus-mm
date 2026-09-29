@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Protocol
+from typing import Final, Protocol
 
 from arcus_bot.bots.market_maker.quoter import MakerQuoteConfig
 from arcus_bot.sdk.account import AccountState
@@ -17,6 +17,8 @@ from arcus_bot.types import (
     OrderRules,
     OrderState,
 )
+
+MAXIMUM_ACCOUNT_AGE_MS: Final = 5_000
 
 
 class MakerClient(Protocol):
@@ -65,8 +67,16 @@ class MakerRuntime:
     maximum_pair_skew_ms: int = 1_000
     requote_interval_ms: int = 500
     minimum_order_rest_ms: int = 5_000
-    dry_run_duration_seconds: int = 0
+    duration_seconds: int = 0
+    run_deadline_ns: int | None = None
+    run_expiration_time_us: int | None = None
+    max_traded_notional_usd: Decimal | None = None
+    max_loss_usd: Decimal | None = None
     mainnet: bool = False
+    candidate_mode: str = "off"
+    max_alpha_bps: Decimal = Decimal("0")
+    alpha_report_path: str = ""
+    alpha_report_data: JsonObject | None = None
 
     def __post_init__(self) -> None:
         if self.maximum_basis_bps <= 0:
@@ -81,11 +91,24 @@ class MakerRuntime:
             self.minimum_order_rest_ms,
         ) <= 0:
             raise InputError(
-                "feed, book, skew, requote, and minimum-rest limits must be positive"
+                "feed, book, skew, requote, and rest limits must be positive"
             )
-        if self.dry_run_duration_seconds < 0:
-            raise InputError("dry-run duration cannot be negative")
+        if self.duration_seconds < 0:
+            raise InputError("run duration cannot be negative")
         if self.mainnet and not self.submit:
             raise InputError("mainnet requires the explicit --submit opt-in")
-        if self.submit and not self.signing_key:
-            raise InputError("live Arcus submission requires ARCUS_API_SIGNING_KEY")
+        if self.submit:
+            if not self.signing_key:
+                raise InputError("live Arcus submission requires ARCUS_API_SIGNING_KEY")
+            if self.duration_seconds < 0:
+                raise InputError("run duration cannot be negative")
+            if (
+                self.max_traded_notional_usd is not None
+                and self.max_traded_notional_usd <= 0
+            ):
+                raise InputError("live traded-notional cap must be positive")
+            if self.max_loss_usd is not None:
+                if self.max_loss_usd <= 0:
+                    raise InputError("live loss limit must be positive")
+                if self.max_loss_usd > self.quote_config.maximum_position_usd:
+                    raise InputError("live loss limit cannot exceed the maximum position")

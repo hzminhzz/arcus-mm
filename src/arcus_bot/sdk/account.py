@@ -24,7 +24,7 @@ def _decimal(data: JsonObject, *keys: str) -> Decimal:
 def _row_position(row: JsonObject) -> Decimal:
     """Convert an Arcus position row into a signed base-asset size."""
     side = row.get("side")
-    size = _decimal(row, "size")
+    size = abs(_decimal(row, "size"))
     match side:
         case "LONG":
             return size
@@ -45,6 +45,10 @@ class AccountState:
     position_sequence: int
     position_updated_at_ns: int
     pending_position_fills: deque[tuple[int, str, Decimal]]
+    seen_trade_ids: set[str]
+    cumulative_traded_notional_usd: Decimal
+    fill_notional_by_order: dict[str, Decimal]
+    account_updated_at_ns: int
     orders_ready: bool
     require_order_sequence: bool
 
@@ -60,7 +64,11 @@ class AccountState:
         self.open_orders: set[str] = set()
         self.order_states: dict[str, OrderState] = {}
         self.fills: deque[Fill] = deque(maxlen=100)
+        self.seen_trade_ids = set()
+        self.cumulative_traded_notional_usd = Decimal(0)
+        self.fill_notional_by_order = {}
         self.account_equity: Decimal | None = None
+        self.account_updated_at_ns = 0
         self.free_collateral: Decimal | None = None
 
     @property
@@ -94,7 +102,7 @@ class AccountState:
         elif channel == "userFills":
             self._apply_fills(message_type, contents)
         elif channel == "account":
-            self._apply_account(message_type, contents)
+            self._apply_account(message_type, contents, received_at)
 
     def _apply_positions(
         self,
@@ -214,13 +222,32 @@ class AccountState:
                 or not isinstance(order_id, str)
                 or not isinstance(side, str)
             ):
+                if message_type == "channel_data":
+                    raise ProtocolError("Arcus fill update omitted trade, order, or side")
                 continue
+            if side not in {"BUY", "SELL"}:
+                raise ProtocolError("Arcus fill side must be BUY or SELL")
             price = _decimal(row, "fillPrice", "price")
             size = _decimal(row, "fillSize", "size")
+            if (
+                not price.is_finite()
+                or not size.is_finite()
+                or price <= 0
+                or size <= 0
+            ):
+                raise ProtocolError("Arcus fill price and size must be finite and positive")
             fee_value = row.get("fee")
             fee = Decimal(str(fee_value)) if isinstance(fee_value, str | int | float) else None
             role_value = row.get("role")
             role = role_value if isinstance(role_value, str) else None
+            if trade_id not in self.seen_trade_ids:
+                if message_type == "channel_data":
+                    notional = price * size
+                    self.cumulative_traded_notional_usd += notional
+                    self.fill_notional_by_order[order_id] = (
+                        self.fill_notional_by_order.get(order_id, Decimal(0)) + notional
+                    )
+                self.seen_trade_ids.add(trade_id)
             self.fills.appendleft(
                 Fill(
                     trade_id=trade_id,
@@ -233,13 +260,22 @@ class AccountState:
                 )
             )
 
-    def _apply_account(self, message_type: JsonValue, contents: JsonObject) -> None:
+    def _apply_account(
+        self,
+        message_type: JsonValue,
+        contents: JsonObject,
+        received_at_ns: int,
+    ) -> None:
         """Cache equity and collateral fields from account snapshots."""
         if message_type not in {"subscribed", "channel_data"}:
             return
         equity_value = contents.get("accountEquity", contents.get("equity"))
         collateral_value = contents.get("freeCollateral")
         if isinstance(equity_value, str):
-            self.account_equity = Decimal(equity_value)
+            equity = _decimal(contents, "accountEquity", "equity")
+            if not equity.is_finite() or equity <= 0:
+                raise ProtocolError("Arcus account equity must be finite and positive")
+            self.account_equity = equity
+            self.account_updated_at_ns = received_at_ns
         if isinstance(collateral_value, str):
             self.free_collateral = Decimal(collateral_value)

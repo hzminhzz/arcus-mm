@@ -23,12 +23,14 @@ _MAX_RECONNECT_SECONDS: Final = 30
 
 @dataclass(frozen=True, slots=True)
 class BinanceBookTicker:
-    """Validated BBO and local monotonic receive time."""
+    """Validated BBO, top-of-book quantities, and local monotonic receive time."""
 
     symbol: str
     bid: Decimal
     ask: Decimal
     received_at_ns: int
+    bid_qty: Decimal | None = None
+    ask_qty: Decimal | None = None
 
     @property
     def mid(self) -> Decimal:
@@ -44,6 +46,8 @@ class _BookTickerFrame(BaseModel):
     s: StrictStr | None = None
     b: StrictStr
     a: StrictStr
+    B: StrictStr | None = None
+    A: StrictStr | None = None
 
     @model_validator(mode="after")
     def validate_prices(self) -> _BookTickerFrame:
@@ -56,6 +60,19 @@ class _BookTickerFrame(BaseModel):
         if not bid.is_finite() or not ask.is_finite() or bid <= 0 or ask <= bid:
             raise ValueError("Binance bookTicker prices must be finite, positive, and uncrossed")
         return self
+
+
+def _parse_quantity(raw_qty: str | None) -> Decimal | None:
+    """Parse wire quantity field into positive finite Decimal or None."""
+    if raw_qty is None:
+        return None
+    try:
+        qty = Decimal(raw_qty)
+    except InvalidOperation:
+        return None
+    if not qty.is_finite() or qty <= 0:
+        return None
+    return qty
 
 
 def parse_book_ticker(
@@ -79,6 +96,8 @@ def parse_book_ticker(
         bid=Decimal(frame.b),
         ask=Decimal(frame.a),
         received_at_ns=received_at_ns,
+        bid_qty=_parse_quantity(frame.B),
+        ask_qty=_parse_quantity(frame.A),
     )
 
 

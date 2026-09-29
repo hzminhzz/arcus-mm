@@ -75,7 +75,7 @@ class ArcusClient:
             )
 
     async def subscribe_maker_channels(self) -> None:
-        """Subscribe to market and account streams used by the continuous maker."""
+        """Subscribe to market, account, order, and fill streams for the maker."""
         self.state.require_order_sequence = True
         await self.subscribe("l2Orderbook", self.account.market)
         for channel in ("orders", "positions", "userFills"):
@@ -85,6 +85,11 @@ class ArcusClient:
                 accountIndex=self.account.account_index,
                 market=self.account.market,
             )
+        await self.subscribe(
+            "account",
+            self.account.address,
+            accountIndex=self.account.account_index,
+        )
 
     async def subscribe_monitor_channels(self) -> None:
         """Subscribe to market and account channels used by the monitor."""

@@ -83,7 +83,14 @@ class MakerOrderManager:
                     return
 
             emergency_threshold = max_position_usd * self.runtime.emergency_flatten_ratio
-            if position_notional >= emergency_threshold and self.orders is not None:
+            if (
+                position_notional >= emergency_threshold
+                and self.orders is not None
+                and best_bid > 0
+                and best_ask > best_bid
+                and best_bid.is_finite()
+                and best_ask.is_finite()
+            ):
                 max_allowed_qty = max_position_usd / fair_price
                 excess_qty = abs(position) - max_allowed_qty
                 aligned_excess = align_size(excess_qty, self.market.mapping.step_size)
@@ -101,28 +108,35 @@ class MakerOrderManager:
                         raw_price = best_bid * (1 - buffer_frac)
                         tick = self.market.tick_size_for(raw_price)
                         flatten_price = align_price(raw_price, tick, ROUND_FLOOR)
-                    order_id = await self.orders.place(
-                        flatten_side,
-                        flatten_price,
-                        aligned_excess,
-                        OrderRules(
-                            tick_size=self.market.tick_size_for(flatten_price),
-                            step_size=self.market.mapping.step_size,
-                            client_id=f"am-{self.market.mapping.market_id}-{self.runtime.run_id}-emerg",
-                            reduce_only=True,
-                            time_in_force="IOC",
-                        ),
-                    )
-                    logger.warning(
-                        "EMERGENCY FLATTEN %s: position notional $%s >= threshold $%s. Placed IOC %s %s@%s (order %s)",
-                        self.market.mapping.market,
-                        position_notional,
-                        emergency_threshold,
-                        flatten_side,
-                        aligned_excess,
-                        flatten_price,
-                        order_id,
-                    )
+                    try:
+                        order_id = await self.orders.place(
+                            flatten_side,
+                            flatten_price,
+                            aligned_excess,
+                            OrderRules(
+                                tick_size=self.market.tick_size_for(flatten_price),
+                                step_size=self.market.mapping.step_size,
+                                client_id=f"am-{self.market.mapping.market_id}-{self.runtime.run_id}-emerg",
+                                reduce_only=True,
+                                time_in_force="IOC",
+                            ),
+                        )
+                        logger.warning(
+                            "EMERGENCY FLATTEN %s: position notional $%s >= threshold $%s. Placed IOC %s %s@%s (order %s)",
+                            self.market.mapping.market,
+                            position_notional,
+                            emergency_threshold,
+                            flatten_side,
+                            aligned_excess,
+                            flatten_price,
+                            order_id,
+                        )
+                    except ProtocolError as error:
+                        logger.warning(
+                            "EMERGENCY FLATTEN placeOrder rejected for %s: %s",
+                            self.market.mapping.market,
+                            error,
+                        )
                     return
 
         unknown_orders = self.client.state.open_orders - self.tracked_orders.keys()
@@ -291,7 +305,14 @@ class MakerOrderManager:
         """Wait for a terminal Arcus lifecycle event after a cancel request."""
         if self.orders is None:
             raise ProtocolError("cannot cancel without an Arcus order adapter")
-        await self.orders.cancel(order_id)
+        try:
+            await self.orders.cancel(order_id)
+        except ProtocolError as error:
+            logger.info(
+                "Arcus cancelOrder rejected for %s: %s; awaiting terminal state",
+                order_id,
+                error,
+            )
         state = await self.client.wait_terminal(order_id, 10)
         if state is None or state.status not in {
             "FILLED",

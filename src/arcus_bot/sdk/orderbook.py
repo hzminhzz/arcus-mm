@@ -27,7 +27,11 @@ class OrderbookState:
             return
         bids = contents_value.get("bids")
         asks = contents_value.get("asks")
-        if not isinstance(bids, list) or not bids or not isinstance(asks, list) or not asks:
+        if not isinstance(bids, list) or not isinstance(asks, list):
+            return
+        if not bids or not asks:
+            self.best_bid = None
+            self.best_ask = None
             return
         bid = bids[0]
         ask = asks[0]

@@ -200,6 +200,9 @@ class ContinuousMaker(Generic[FeedT]):
             return None
         local_mid = (best_bid + best_ask) / 2
         fair_anchor = reference.fair_anchor
+        if fair_anchor <= 0 or not fair_anchor.is_finite():
+            await self.pause(f"{feed_label} fair anchor is non-positive or invalid")
+            return None
         instantaneous_basis_bps = (
             abs(local_mid - fair_anchor) * Decimal(10_000) / fair_anchor
         )

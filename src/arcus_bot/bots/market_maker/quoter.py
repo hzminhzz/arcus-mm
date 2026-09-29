@@ -252,9 +252,24 @@ def calculate_quotes(context: QuoteContext) -> tuple[Quote, ...]:
                 edge_bps = (price - fair) * _BPS / fair - config.maker_fee_bps
                 is_passive = price > bid
         is_inventory_reducing = (
-            (side == "SELL" and context.position > 0)
-            or (side == "BUY" and context.position < 0)
+            (side == "SELL" and context.position >= market.mapping.min_order_size)
+            or (side == "BUY" and context.position <= -market.mapping.min_order_size)
         )
+        if is_inventory_reducing:
+            if side == "SELL":
+                aligned_quantity = min(
+                    aligned_quantity,
+                    _align_size(context.position, market.mapping.step_size),
+                )
+            elif side == "BUY":
+                aligned_quantity = min(
+                    aligned_quantity,
+                    _align_size(abs(context.position), market.mapping.step_size),
+                )
+            if aligned_quantity < market.mapping.min_order_size:
+                continue
+            if aligned_quantity * price < market.mapping.min_order_notional:
+                continue
         if edge_bps < config.minimum_edge_bps + config.latency_buffer_bps:
             if not is_inventory_reducing or edge_bps < 0:
                 continue

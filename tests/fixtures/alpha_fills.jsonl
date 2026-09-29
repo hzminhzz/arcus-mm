@@ -1,0 +1,3 @@
+{"recv_time_ns":1000150000,"event_time_ms":1774900000150,"symbol":"BTCUSDT","policy":"maker_baseline_v1","side":"BUY","price":"65000.50","quantity":"0.010","fee":"0.00975","source":"observed","provenance":"observed"}
+{"recv_time_ns":1000350000,"event_time_ms":1774900000350,"symbol":"BTCUSDT","policy":"maker_baseline_v1","side":"SELL","price":"65002.00","quantity":"0.010","fee":"0.00975","source":"observed","provenance":"observed"}
+{"recv_time_ns":1000450000,"event_time_ms":1774900000450,"symbol":"BTCUSDT","policy":"experimental_candidate_v2","side":"BUY","price":"65001.00","quantity":"0.020","fee":"0.01950","source":"synthetic","provenance":"synthetic"}

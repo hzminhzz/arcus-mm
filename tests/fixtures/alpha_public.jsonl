@@ -1,0 +1,6 @@
+{"recv_time_ns":1000000000,"event_time_ms":1774900000000,"symbol":"BTCUSDT","b":"65000.00","a":"65001.00","B":"1.500","A":"2.100","candidate_size":"0.010","baseline_frame":true}
+{"recv_time_ns":1000100000,"event_time_ms":1774900000100,"symbol":"BTCUSDT","b":"65000.50","a":"65001.00","B":"1.800","A":"1.900","candidate_size":"0.010","baseline_frame":true}
+{"recv_time_ns":1000200000,"event_time_ms":1774900000200,"symbol":"BTCUSDT","b":"65000.50","a":"65001.50","B":"2.200","A":"0.850","candidate_size":"0.015","baseline_frame":true}
+{"recv_time_ns":1000300000,"event_time_ms":1774900000300,"symbol":"BTCUSDT","b":"65001.00","a":"65002.00","B":"0.950","A":"3.400","candidate_size":"0.020","baseline_frame":true}
+{"recv_time_ns":1000400000,"event_time_ms":1774900000400,"symbol":"BTCUSDT","b":"65001.00","a":"65001.50","B":"1.100","A":"1.250","candidate_size":"0.010","baseline_frame":true}
+{"recv_time_ns":1000500000,"event_time_ms":1774900000500,"symbol":"BTCUSDT","b":"65000.50","a":"65001.50","B":"2.500","A":"1.500","candidate_size":"0.015","baseline_frame":true}

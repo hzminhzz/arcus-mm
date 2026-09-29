@@ -171,7 +171,7 @@ async def _preview_feeds(options: MakerOptions) -> None:
 
                 quotes = order_manager.quotes(ref_anchor, best_bid, best_ask)
                 quote_str = " ".join(
-                    f"{q.side} {q.quantity}@{q.price}" for q in quotes
+                    f"{q.side}{'[RO]' if q.reduce_only else ''} {q.quantity}@{q.price}" for q in quotes
                 )
 
                 oracle_desc = (

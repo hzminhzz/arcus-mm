@@ -43,7 +43,7 @@ class MakerOrderManager:
         best_ask: Decimal,
     ) -> tuple[Quote, ...]:
         """Calculate candidates using Arcus position as the source of truth."""
-        position = self.client.state.effective_position if self.runtime.submit else Decimal(0)
+        position = self.client.state.effective_position
         return calculate_quotes(
             QuoteContext(
                 market=self.market,
@@ -64,7 +64,7 @@ class MakerOrderManager:
     ) -> None:
         """Cancel and confirm changed orders before placing replacements."""
         desired_by_side = {quote.side: quote for quote in desired_quotes}
-        position = self.client.state.effective_position if self.runtime.submit else Decimal(0)
+        position = self.client.state.effective_position
         position_notional = abs(position) * fair_price
         max_position_usd = self.runtime.quote_config.maximum_position_usd
         is_exposure_breached = position_notional > max_position_usd

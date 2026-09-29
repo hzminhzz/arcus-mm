@@ -186,6 +186,11 @@ def calculate_quotes(context: QuoteContext) -> tuple[Quote, ...]:
     buy_price = min(buy_price, _align(safe_bid, market.tick_size_for(safe_bid), ROUND_FLOOR))
     sell_price = max(sell_price, _align(safe_ask, market.tick_size_for(safe_ask), ROUND_CEILING))
 
+    if context.position < 0 and buy_price > fair:
+        buy_price = min(buy_price, _align(fair, buy_tick, ROUND_FLOOR))
+    elif context.position > 0 and sell_price < fair:
+        sell_price = max(sell_price, _align(fair, sell_tick, ROUND_CEILING))
+
     buy_room = max(Decimal(0), inventory_cap - context.position)
     sell_room = max(Decimal(0), inventory_cap + context.position)
     if context.position >= inventory_cap:

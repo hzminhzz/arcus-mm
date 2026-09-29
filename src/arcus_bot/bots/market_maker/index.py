@@ -398,7 +398,8 @@ class ContinuousMaker(Generic[FeedT]):
             return
         self.last_preview = quotes
         formatted = " ".join(
-            f"{quote.side} {quote.quantity}@{quote.price}" for quote in quotes
+            f"{quote.side}{'[RO]' if quote.reduce_only else ''} {quote.quantity}@{quote.price}"
+            for quote in quotes
         )
         logger.info(
             "DRY-RUN %s fair=%s basisSamples=%s %s",

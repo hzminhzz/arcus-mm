@@ -347,10 +347,7 @@ class ContinuousMaker(Generic[FeedT]):
 
     def _stale_duration_exceeded(self, reason: str, now_ns: int) -> bool:
         """Reconnect after a full freshness window without market data."""
-        if reason != self.stale_reason:
-            self.stale_reason = reason
-            self.stale_since_ns = now_ns
-            return False
+        self.stale_reason = reason
         if self.stale_since_ns == 0:
             self.stale_since_ns = now_ns
             return False
@@ -420,6 +417,7 @@ async def run_market(runtime: MakerRuntime, market: MarketInfo) -> None:
     while True:
         maker: ContinuousMaker[BinanceBookTickerFeed] | ContinuousMaker[HyperliquidBookTickerFeed] | None = None
         remaining_seconds: float | None = None
+        session_connected_at_ns: int = monotonic_ns()
         if runtime.run_deadline_ns is not None:
             remaining_seconds = (
                 runtime.run_deadline_ns - monotonic_ns()
@@ -436,6 +434,7 @@ async def run_market(runtime: MakerRuntime, market: MarketInfo) -> None:
                 ping_interval=20,
                 ping_timeout=20,
             ) as socket:
+                session_connected_at_ns = monotonic_ns()
                 client = ArcusClient(socket, runtime.account)
                 order_config = OrderConfig(
                     account=runtime.account,
@@ -488,6 +487,8 @@ async def run_market(runtime: MakerRuntime, market: MarketInfo) -> None:
                         return
                 return
         except (OSError, TimeoutError, websockets.WebSocketException) as error:
+            if monotonic_ns() - session_connected_at_ns >= 10_000_000_000:
+                reconnect_seconds = 1
             if maker is not None and maker.session_started:
                 recover_existing_orders = True
             logger.warning(
@@ -500,6 +501,8 @@ async def run_market(runtime: MakerRuntime, market: MarketInfo) -> None:
         except BaseExceptionGroup as errors:
             if not is_recoverable_session_error(errors):
                 raise
+            if monotonic_ns() - session_connected_at_ns >= 10_000_000_000:
+                reconnect_seconds = 1
             if maker is not None and maker.session_started:
                 recover_existing_orders = True
             logger.warning(

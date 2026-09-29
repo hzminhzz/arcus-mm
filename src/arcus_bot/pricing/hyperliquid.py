@@ -246,7 +246,10 @@ class HyperliquidBookTickerFeed:
                     await self._subscribe(socket)
                     async with anyio.create_task_group() as tg:
                         _ = tg.start_soon(self._ping_loop, socket)
-                        await self._read_stream(socket)
+                        try:
+                            await self._read_stream(socket)
+                        finally:
+                            tg.cancel_scope.cancel()
                     if monotonic_ns() - connected_at_ns >= 10_000_000_000:
                         delay = 1
             except (OSError, TimeoutError, websockets.WebSocketException) as error:
@@ -307,7 +310,7 @@ class HyperliquidBookTickerFeed:
                                 symbol=self.latest.symbol,
                                 bid=self.latest.bid,
                                 ask=self.latest.ask,
-                                received_at_ns=self.latest.received_at_ns,
+                                received_at_ns=now_ns,
                                 bid_qty=self.latest.bid_qty,
                                 ask_qty=self.latest.ask_qty,
                                 oracle_px=oracle,

@@ -306,8 +306,8 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
 
     if args.submit and args.dry_run:
         raise InputError("choose either --submit or --dry-run")
-    if args.mainnet and not args.submit and not args.preview_feeds:
-        raise InputError("--mainnet requires --submit")
+    if args.mainnet and not args.submit and not args.dry_run and not args.preview_feeds:
+        raise InputError("--mainnet requires --submit or --dry-run")
     if args.duration_seconds < 0:
         raise InputError("--duration-seconds cannot be negative")
     if args.account_index not in range(10):

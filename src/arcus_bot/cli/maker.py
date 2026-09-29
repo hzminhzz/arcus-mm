@@ -53,9 +53,10 @@ async def _run(options: MakerOptions) -> None:
                 market_id=mapping.market_id,
                 market=mapping.market,
             )
+            quote_config = options.quote_configs.get(mapping.market, options.quote_config)
             runtime = MakerRuntime(
                 account=account,
-                quote_config=options.quote_config,
+                quote_config=quote_config,
                 submit=options.submit,
                 signing_key=options.signing_key,
                 run_id=uuid.uuid4().hex[:12],
@@ -119,9 +120,10 @@ async def _preview_feeds(options: MakerOptions) -> None:
             market_id=mapping.market_id,
             market=mapping.market,
         )
+        quote_config = options.quote_configs.get(mapping.market, options.quote_config)
         runtime = MakerRuntime(
             account=account,
-            quote_config=options.quote_config,
+            quote_config=quote_config,
             submit=False,
             signing_key=None,
             run_id="preview",

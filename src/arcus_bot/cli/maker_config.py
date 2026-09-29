@@ -88,6 +88,7 @@ class MakerOptions:
     preview_feeds: bool = False
     emergency_flatten_ratio: Decimal = Decimal("1.20")
     emergency_flatten_buffer_bps: Decimal = Decimal("10")
+    quote_configs: dict[str, MakerQuoteConfig] = field(default_factory=dict)
 
 
 MakerConfig = MakerOptions
@@ -195,6 +196,43 @@ def parse_reference_feed(
             feed_type, feed_sym = mapping.resolve_feed(target_feed)
             feed_map[mapping.market] = (feed_type, feed_sym)
     return feed_map
+
+
+def _parse_market_decimal(
+    raw_val: str,
+    label: str,
+    mappings: tuple[MarketMapping, ...],
+    *,
+    allow_negative: bool = False,
+) -> dict[str, Decimal]:
+    """Parse a single decimal or comma-separated market=value overrides."""
+    cleaned = raw_val.strip()
+    result: dict[str, Decimal] = {}
+    if "=" in cleaned:
+        overrides: dict[str, Decimal] = {}
+        for item in cleaned.split(","):
+            part = item.strip()
+            if not part:
+                continue
+            if "=" not in part:
+                raise InputError(f"invalid market=value format in {label}: {part!r}")
+            mkt, val = part.split("=", 1)
+            mkt_clean = mkt.strip().upper()
+            overrides[mkt_clean] = _decimal(
+                val.strip(),
+                f"{label} for {mkt_clean}",
+                allow_negative=allow_negative,
+            )
+        for mapping in mappings:
+            if mapping.market in overrides:
+                result[mapping.market] = overrides[mapping.market]
+            else:
+                raise InputError(f"missing {label} override for market {mapping.market}")
+    else:
+        dec = _decimal(cleaned, label, allow_negative=allow_negative)
+        for mapping in mappings:
+            result[mapping.market] = dec
+    return result
 
 
 def _decimal(value: str, label: str, *, allow_negative: bool = False) -> Decimal:
@@ -348,12 +386,33 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
             raise InputError(f"unsupported Arcus market {symbol!r}; choose {supported}")
         mappings.append(mapping)
 
-    order_size = _decimal(args.order_size_usd, "--order-size-usd")
-    maximum_position = _decimal(args.max_position_usd, "--max-position-usd")
-    if order_size <= 0 or maximum_position <= 0:
-        raise InputError("order size and maximum position must be positive")
-    if order_size > maximum_position:
-        raise InputError("--order-size-usd cannot exceed --max-position-usd")
+    order_sizes = _parse_market_decimal(args.order_size_usd, "--order-size-usd", tuple(mappings))
+    max_positions = _parse_market_decimal(args.max_position_usd, "--max-position-usd", tuple(mappings))
+    maker_fee = _decimal(args.maker_fee_bps, "--maker-fee-bps", allow_negative=True)
+    min_edge = _decimal(args.minimum_edge_bps, "--minimum-edge-bps")
+    latency_buf = _decimal(args.latency_buffer_bps, "--latency-buffer-bps")
+    inventory_skews = _parse_market_decimal(args.inventory_skew_bps, "--inventory-skew-bps", tuple(mappings))
+
+    quote_configs: dict[str, MakerQuoteConfig] = {}
+    for mapping in mappings:
+        mkt = mapping.market
+        sz = order_sizes[mkt]
+        cap = max_positions[mkt]
+        skew = inventory_skews[mkt]
+        if sz <= 0 or cap <= 0:
+            raise InputError(f"order size and maximum position for {mkt} must be positive")
+        if sz > cap:
+            raise InputError(f"--order-size-usd cannot exceed --max-position-usd for {mkt}")
+        quote_configs[mkt] = MakerQuoteConfig(
+            order_size_usd=sz,
+            maximum_position_usd=cap,
+            maker_fee_bps=maker_fee,
+            minimum_edge_bps=min_edge,
+            latency_buffer_bps=latency_buf,
+            inventory_skew_bps=skew,
+        )
+    primary_quote_config = quote_configs[mappings[0].market]
+
     maximum_traded_notional = (
         _decimal(args.max_traded_notional_usd, "--max-traded-notional-usd")
         if args.max_traded_notional_usd is not None
@@ -369,16 +428,9 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
     if args.submit and maximum_loss is not None:
         if maximum_loss <= 0:
             raise InputError("--max-loss-usd must be positive")
-        if maximum_loss > maximum_position:
+        max_possible_pos = max(max_positions.values())
+        if maximum_loss > max_possible_pos:
             raise InputError("--max-loss-usd cannot exceed --max-position-usd")
-    quote_config = MakerQuoteConfig(
-        order_size_usd=order_size,
-        maximum_position_usd=maximum_position,
-        maker_fee_bps=_decimal(args.maker_fee_bps, "--maker-fee-bps", allow_negative=True),
-        minimum_edge_bps=_decimal(args.minimum_edge_bps, "--minimum-edge-bps"),
-        latency_buffer_bps=_decimal(args.latency_buffer_bps, "--latency-buffer-bps"),
-        inventory_skew_bps=_decimal(args.inventory_skew_bps, "--inventory-skew-bps"),
-    )
     maximum_basis = _decimal(args.max_basis_bps, "--max-basis-bps")
     if maximum_basis <= 0:
         raise InputError("--max-basis-bps must be positive")
@@ -429,7 +481,7 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
         markets=tuple(mappings),
         account_address=account_address,
         account_index=args.account_index,
-        quote_config=quote_config,
+        quote_config=primary_quote_config,
         maximum_basis_bps=maximum_basis,
         maximum_feed_age_ms=args.maximum_feed_age_ms,
         maximum_book_age_ms=args.maximum_book_age_ms,
@@ -454,4 +506,5 @@ def parse_options(argv: list[str] | None = None) -> MakerOptions:
         preview_feeds=args.preview_feeds,
         emergency_flatten_ratio=emergency_ratio,
         emergency_flatten_buffer_bps=emergency_buffer,
+        quote_configs=quote_configs,
     )

@@ -335,3 +335,35 @@ async def test_circuit_breaker_forbids_exposure_increasing_candidate_placement()
     assert placed.side == "BUY"
     assert placed.rules is not None
     assert placed.rules.reduce_only is True
+
+
+def test_cli_supports_per_market_overrides() -> None:
+    from arcus_bot.cli.maker_config import parse_options
+    argv = [
+        "--markets", "BTC-USD,ZEC-USD,HOOD-USD,NVDA-USD",
+        "--order-size-usd", "BTC-USD=35,ZEC-USD=15,HOOD-USD=20,NVDA-USD=30",
+        "--max-position-usd", "BTC-USD=350,ZEC-USD=150,HOOD-USD=200,NVDA-USD=300",
+        "--maker-fee-bps", "0",
+        "--minimum-edge-bps", "1.5",
+        "--latency-buffer-bps", "1.0",
+        "--inventory-skew-bps", "BTC-USD=15,ZEC-USD=20,HOOD-USD=30,NVDA-USD=10",
+        "--max-basis-bps", "50",
+        "--dry-run",
+    ]
+    options = parse_options(argv)
+    assert len(options.quote_configs) == 4
+    assert options.quote_configs["BTC-USD"].order_size_usd == Decimal("35")
+    assert options.quote_configs["BTC-USD"].maximum_position_usd == Decimal("350")
+    assert options.quote_configs["BTC-USD"].inventory_skew_bps == Decimal("15")
+
+    assert options.quote_configs["ZEC-USD"].order_size_usd == Decimal("15")
+    assert options.quote_configs["ZEC-USD"].maximum_position_usd == Decimal("150")
+    assert options.quote_configs["ZEC-USD"].inventory_skew_bps == Decimal("20")
+
+    assert options.quote_configs["HOOD-USD"].order_size_usd == Decimal("20")
+    assert options.quote_configs["HOOD-USD"].maximum_position_usd == Decimal("200")
+    assert options.quote_configs["HOOD-USD"].inventory_skew_bps == Decimal("30")
+
+    assert options.quote_configs["NVDA-USD"].order_size_usd == Decimal("30")
+    assert options.quote_configs["NVDA-USD"].maximum_position_usd == Decimal("300")
+    assert options.quote_configs["NVDA-USD"].inventory_skew_bps == Decimal("10")

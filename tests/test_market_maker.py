@@ -24,6 +24,7 @@ from arcus_bot.bots.market_maker.order_manager import MakerOrderManager
 from arcus_bot.bots.market_maker.index import (
     ContinuousMaker,
     freshness_reason,
+    is_recoverable_session_error,
 )
 from arcus_bot.bots.market_maker.quoter import (
     BasisEstimator,
@@ -892,6 +893,19 @@ def test_cancel_open_orders_includes_order_created_before_timeout() -> None:
     # Then the order is canceled even though placement never returned its ID.
     assert orders.cancelled == ["untracked-order"]
     assert not client.state.open_orders
+
+
+def test_recoverable_errors_accepts_nested_transport_failures() -> None:
+    # Given a task group containing only reconnectable transport failures.
+    recoverable = ExceptionGroup(
+        "session",
+        [TimeoutError(), ExceptionGroup("nested", [OSError("socket closed")])],
+    )
+    fatal = ExceptionGroup("session", [ProtocolError("unmanaged orders")])
+
+    # Then transport failures can restart, but ownership failures still stop.
+    assert is_recoverable_session_error(recoverable)
+    assert not is_recoverable_session_error(fatal)
 
 
 def test_projected_position_reserves_fillable_order_quantity() -> None:

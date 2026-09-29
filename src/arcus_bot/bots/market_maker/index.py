@@ -450,7 +450,7 @@ async def run_market(runtime: MakerRuntime, market: MarketInfo) -> None:
                 error,
             )
         except BaseExceptionGroup as errors:
-            if not _recoverable_errors(errors):
+            if not is_recoverable_session_error(errors):
                 raise
             if maker is not None and maker.session_started:
                 recover_existing_orders = True
@@ -473,11 +473,11 @@ async def run_market(runtime: MakerRuntime, market: MarketInfo) -> None:
         reconnect_seconds = min(reconnect_seconds * 2, 30)
 
 
-def _recoverable_errors(error: BaseExceptionGroup[BaseException]) -> bool:
+def is_recoverable_session_error(error: BaseExceptionGroup[BaseException]) -> bool:
     """Identify transport/RPC failures that can safely restart a session."""
     for item in error.exceptions:
         if isinstance(item, BaseExceptionGroup):
-            if not _recoverable_errors(cast(BaseExceptionGroup[BaseException], item)):
+            if not is_recoverable_session_error(cast(BaseExceptionGroup[BaseException], item)):
                 return False
         elif not isinstance(item, (OSError, TimeoutError, websockets.WebSocketException)):
             return False
